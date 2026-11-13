@@ -4,6 +4,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   SlashCommandBuilder,
   type Attachment,
   type ChatInputCommandInteraction,
@@ -263,14 +264,14 @@ export class Bot {
       if (!this.isAllowedUser(interaction.user.id)) {
         await interaction.reply({
           content: 'この操作は許可されていません。',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
       if (!this.isAllowedChannel(interaction.channelId)) {
         await interaction.reply({
           content: 'このチャンネルは許可されていません。',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
@@ -305,9 +306,9 @@ export class Bot {
       try {
         const content = `エラー: ${errorMessage(error)}`;
         if (interaction.deferred || interaction.replied) {
-          await interaction.followUp({ content, ephemeral: true });
+          await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
         } else {
-          await interaction.reply({ content, ephemeral: true });
+          await interaction.reply({ content, flags: MessageFlags.Ephemeral });
         }
       } catch {
         // ignore secondary failures
@@ -318,7 +319,7 @@ export class Bot {
   private async handleAsk(interaction: ChatInputCommandInteraction): Promise<void> {
     const prompt = interaction.options.getString('prompt', true).trim();
     if (prompt === '') {
-      await interaction.reply({ content: 'プロンプトが空です。', ephemeral: true });
+      await interaction.reply({ content: 'プロンプトが空です。', flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -361,7 +362,7 @@ export class Bot {
     await this.sessions.clearSession(interaction.channelId);
     await interaction.reply({
       content: `セッションをリセットしました。\ncwd: \`${record.cwd}\``,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -373,12 +374,12 @@ export class Bot {
       await this.sessions.setCwd(interaction.channelId, target);
       await interaction.reply({
         content: `cwd を変更しました: \`${target}\`\nセッションはリセットされました。`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     } catch (error) {
       await interaction.reply({
         content: `変更できません: ${errorMessage(error)}`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   }
@@ -391,7 +392,7 @@ export class Bot {
     if (!input) {
       await interaction.reply({
         content: `model: ${current ? `\`${current}\`` : 'デフォルト'}\n変更は \`/model model:<id>\`、解除は \`/model model:default\`。`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -400,7 +401,7 @@ export class Bot {
       await this.sessions.setModel(interaction.channelId, null);
       await interaction.reply({
         content: `model をデフォルトに戻しました${this.config.defaultModel ? ` (\`${this.config.defaultModel}\`)` : ''}。次のメッセージから適用されます。`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -408,7 +409,7 @@ export class Bot {
     if (!/^[A-Za-z0-9._:/-]+$/.test(input)) {
       await interaction.reply({
         content: `モデル ID の形式が不正です: \`${input}\``,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -416,7 +417,7 @@ export class Bot {
     await this.sessions.setModel(interaction.channelId, input);
     await interaction.reply({
       content: `model を \`${input}\` に変更しました。次のメッセージから適用されます。`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -424,7 +425,7 @@ export class Bot {
     await interaction.reply({
       content:
         '使用量・クレジットは対話モードの `/usage` か https://commandcode.ai/usage で確認できます。ヘッドレス実行からは実数値を取得できません。',
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 
@@ -440,7 +441,7 @@ export class Bot {
       `同時実行上限: ${this.config.maxConcurrency}`,
       `稼働時間: ${formatDuration(Date.now() - this.startedAt)}`,
     ];
-    await interaction.reply({ content: lines.join('\n'), ephemeral: true });
+    await interaction.reply({ content: lines.join('\n'), flags: MessageFlags.Ephemeral });
   }
 
   private async handleStop(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -448,12 +449,12 @@ export class Bot {
     if (!controller) {
       await interaction.reply({
         content: '実行中の処理はありません。',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
     controller.abort();
-    await interaction.reply({ content: '停止しました。', ephemeral: true });
+    await interaction.reply({ content: '停止しました。', flags: MessageFlags.Ephemeral });
   }
 
   private async handlePrompt(
