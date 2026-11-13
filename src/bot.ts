@@ -360,10 +360,10 @@ export class Bot {
         const current = record.effort ?? this.config.defaultEffort;
         const values = new Map<string, string>();
         if (current && current.includes(query)) {
-          values.set(current, `${current} (現在)`);
+          values.set(current, current);
         }
         if ('default'.includes(query)) {
-          values.set('default', 'default (既定に戻す)');
+          values.set('default', 'default');
         }
         for (const level of EFFORTS) {
           if (level.includes(query)) values.set(level, level);
@@ -383,21 +383,24 @@ export class Bot {
 
       const record = this.sessions.get(interaction.channelId, this.config.defaultCwd);
       const current = record.model ?? this.config.defaultModel;
-      const models = await this.getModelsWithTimeout();
+      const models = this.modelCache ?? [];
+      if (!this.modelCache) {
+        void this.getModels();
+      }
       const choices = new Map<string, string>();
 
       if (current && current.toLowerCase().includes(query)) {
-        choices.set(current, truncate(`${current} (現在)`, 100));
+        choices.set(current, truncate(current, 100));
       }
       if ('default'.includes(query)) {
-        choices.set('default', 'default (既定に戻す)');
+        choices.set('default', 'default');
       }
       for (const model of models) {
         if (!model.id.toLowerCase().includes(query)) continue;
         if (choices.has(model.id)) continue;
         choices.set(
           model.id,
-          truncate(`${model.id} — ${model.description}`, 100),
+          truncate(`${model.id}: ${model.description}`, 100),
         );
         if (choices.size >= 25) break;
       }
@@ -433,6 +436,7 @@ export class Bot {
       .then((models) => {
         this.modelCache = models;
         this.modelCacheAt = Date.now();
+        logger.info(`モデル一覧を取得しました: ${models.length} 件`);
         return models;
       })
       .catch((error: unknown) => {
@@ -445,16 +449,6 @@ export class Bot {
       });
 
     return this.modelLoad;
-  }
-
-  private async getModelsWithTimeout(): Promise<ModelInfo[]> {
-    return Promise.race([
-      this.getModels(),
-      new Promise<ModelInfo[]>((resolve) => {
-        const timer = setTimeout(() => resolve([]), 2400);
-        timer.unref();
-      }),
-    ]);
   }
 
   private async handleAsk(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -573,6 +567,11 @@ export class Bot {
     const model = record.model ?? this.config.defaultModel;
     const effort = record.effort ?? this.config.defaultEffort;
     const changed = nextModel !== undefined || nextEffort !== undefined;
+    if (changed) {
+      logger.info(
+        `model 設定 channel=${interaction.channelId} model=${record.model ?? 'default'} effort=${record.effort ?? 'default'}`,
+      );
+    }
     const lines = [
       `model: ${model ? `\`${model}\`` : 'デフォルト'}`,
       `effort: ${effort ? `\`${effort}\`` : 'デフォルト'}`,
