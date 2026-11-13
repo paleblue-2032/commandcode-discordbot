@@ -68,6 +68,15 @@
 
 `/model` の model / effort は候補から選択でき、文字入力で絞り込めます。モデル候補は `cmd --list-models` から取得して 10 分キャッシュします。推論強度は `off` / `low` / `medium` / `high` / `xhigh` / `max` で、モデルが対応している値のみ有効です。
 
+## セキュリティ
+
+- SSH は鍵認証のみ（パスワード認証・root ログイン無効）、ufw は 22/tcp のみ許可
+- bot は `cmdbot` で実行し、systemd の sandbox（`ProtectSystem=strict`、`NoNewPrivileges` など）で動作
+- `.env` は root 所有 600。トークンは systemd の `EnvironmentFile` 経由でのみ読み、`cmd` 子プロセスには秘密の環境変数を渡さない
+- `~/.commandcode/settings.json` の deny ルールで sudo / systemctl / 秘密ファイルの読み取りを禁止
+- `sudo` は運用コマンドのみ NOPASSWD。全権限 sudo はパスワードが必要
+- `dis.txt` などのトークン控えは削除する
+
 ## ファイルの受け渡し
 
 - メッセージに添付したファイルは `<cwd>/.discord-uploads/` に保存され、cmd にパスが渡されます。
@@ -111,7 +120,7 @@ sudo -u cmdbot -H env PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr
 sudo systemctl restart commandcode-discordbot
 ```
 
-- `.env` は `/srv/commandcode-discordbot/.env`（600、cmdbot 所有）。
+- `.env` は `/srv/commandcode-discordbot/.env`（600、root 所有）。編集は `sudo nano`。
 - systemd unit は `deploy/commandcode-discordbot.service`。
 - `sessions.json` は `/srv/commandcode-discordbot/sessions.json`。
 

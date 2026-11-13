@@ -17,6 +17,12 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
 ReadWritePaths=/srv/work /srv/commandcode-discordbot /home/cmdbot/.commandcode /home/cmdbot/.cache
 UMask=0002
 

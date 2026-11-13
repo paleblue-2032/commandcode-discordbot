@@ -63,6 +63,16 @@ export class NdjsonParser {
   }
 }
 
+export function cmdEnvironment(): NodeJS.ProcessEnv {
+  const keys = ['HOME', 'PATH', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'USER', 'LOGNAME'];
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 export function buildArgs(options: RunOptions): string[] {
   const args = [
     '-p',
@@ -111,6 +121,7 @@ export function runCmd(options: RunOptions): Promise<RunResult> {
         cwd: options.cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,
+        env: cmdEnvironment(),
       });
     } catch (error) {
       resolve({

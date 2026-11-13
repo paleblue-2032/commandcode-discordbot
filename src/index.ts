@@ -9,7 +9,11 @@ const envFile = process.env.BOT_ENV_FILE
   ? path.resolve(process.env.BOT_ENV_FILE)
   : path.resolve(process.cwd(), '.env');
 if (existsSync(envFile)) {
-  process.loadEnvFile(envFile);
+  try {
+    process.loadEnvFile(envFile);
+  } catch (error) {
+    if (!process.env.DISCORD_TOKEN) throw error;
+  }
 }
 
 async function main(): Promise<void> {

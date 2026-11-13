@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { stripAnsi } from './format.js';
+import { cmdEnvironment } from './runner.js';
 
 export interface ModelInfo {
   id: string;
@@ -33,7 +34,7 @@ export function listModels(cmdBin: string, cwd: string): Promise<ModelInfo[]> {
     execFile(
       cmdBin,
       ['--list-models'],
-      { cwd, timeout: 15_000, maxBuffer: 2 * 1024 * 1024 },
+      { cwd, timeout: 15_000, maxBuffer: 2 * 1024 * 1024, env: cmdEnvironment() },
       (error, stdout) => {
         if (error) {
           reject(error);
