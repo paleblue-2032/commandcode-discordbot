@@ -10,7 +10,7 @@ Group=cmdbot
 WorkingDirectory=/srv/commandcode-discordbot
 EnvironmentFile=/srv/commandcode-discordbot/.env
 Environment=HOME=/home/cmdbot
-Environment=PATH=/home/cmdbot/.npm-global/bin:/home/cmdbot/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/home/cmdbot/.npm-global/bin:/home/cmdbot/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/srv/commandcode-discordbot/result/bin/commandcode-discordbot
 Restart=always
 RestartSec=5
