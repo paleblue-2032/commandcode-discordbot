@@ -29,12 +29,13 @@ test('NdjsonParser parses a final line without a newline', () => {
   assert.deepEqual(lines, ['{"a":1}']);
 });
 
-test('buildArgs includes resume and max turns', () => {
+test('buildArgs includes resume, model, and max turns', () => {
   const args = buildArgs({
     cmdBin: 'cmd',
     prompt: 'hello',
     cwd: '/tmp',
     sessionId: 'session-1',
+    model: 'deepseek/deepseek-v4-flash',
     maxTurns: 5,
   });
 
@@ -43,6 +44,7 @@ test('buildArgs includes resume and max turns', () => {
   assert.ok(args.includes('json'));
   assert.ok(args.includes('--yolo'));
   assert.equal(args[args.indexOf('--resume') + 1], 'session-1');
+  assert.equal(args[args.indexOf('-m') + 1], 'deepseek/deepseek-v4-flash');
   assert.equal(args[args.indexOf('--max-turns') + 1], '5');
 });
 
@@ -54,6 +56,7 @@ test('buildArgs omits resume when no session exists', () => {
     sessionId: null,
   });
   assert.ok(!args.includes('--resume'));
+  assert.ok(!args.includes('-m'));
   assert.ok(!args.includes('--max-turns'));
 });
 

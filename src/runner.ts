@@ -18,6 +18,7 @@ export interface RunOptions {
   prompt: string;
   cwd: string;
   sessionId?: string | null;
+  model?: string | null;
   maxTurns?: number | null;
   onEvent?: (event: AgentEvent) => void;
   signal?: AbortSignal;
@@ -73,6 +74,9 @@ export function buildArgs(options: RunOptions): string[] {
   ];
   if (options.sessionId) {
     args.push('--resume', options.sessionId);
+  }
+  if (options.model) {
+    args.push('-m', options.model);
   }
   if (options.maxTurns) {
     args.push('--max-turns', String(options.maxTurns));

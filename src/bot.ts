@@ -1,13 +1,23 @@
 import { stat } from 'node:fs/promises';
 import {
+  AttachmentBuilder,
   Client,
   Events,
   GatewayIntentBits,
   SlashCommandBuilder,
+  type Attachment,
   type ChatInputCommandInteraction,
   type Interaction,
   type Message,
+  type MessageCreateOptions,
 } from 'discord.js';
+import {
+  extractAttachmentMarkers,
+  saveAttachments,
+  type ExtractResult,
+  type FileToSend,
+  type SavedAttachment,
+} from './attachments.js';
 import type { Config } from './config.js';
 import { formatDuration, splitMessage, stripAnsi, truncate } from './format.js';
 import { errorMessage, logger } from './logger.js';
@@ -29,19 +39,23 @@ interface ProgressUi {
 interface PromptUi {
   createProgress(content: string): Promise<ProgressUi>;
   sendAnswer(content: string): Promise<void>;
+  sendFiles(files: FileToSend[]): Promise<void>;
 }
 
 interface SendableChannel {
-  send(options: {
-    content: string;
-    allowedMentions?: { parse: [] };
-  }): Promise<Message>;
+  send(options: MessageCreateOptions): Promise<Message>;
 }
 
 function isSendable(
   channel: Message['channel'],
 ): channel is Message['channel'] & SendableChannel {
   return typeof (channel as { send?: unknown }).send === 'function';
+}
+
+function attachmentBuilders(files: FileToSend[]): AttachmentBuilder[] {
+  return files.map(
+    (file) => new AttachmentBuilder(file.path, { name: file.name }),
+  );
 }
 
 const COMMANDS = [
@@ -61,11 +75,23 @@ const COMMANDS = [
       option.setName('path').setDescription('許可ルート配下のパス').setRequired(true),
     ),
   new SlashCommandBuilder()
+    .setName('model')
+    .setDescription('使用するモデルを変更する')
+    .addStringOption((option) =>
+      option
+        .setName('model')
+        .setDescription('モデル ID（省略で表示、default で解除）')
+        .setRequired(false),
+    ),
+  new SlashCommandBuilder()
     .setName('status')
     .setDescription('現在の cwd とセッション状態を表示する'),
   new SlashCommandBuilder()
     .setName('stop')
     .setDescription('実行中の処理を停止する'),
+  new SlashCommandBuilder()
+    .setName('usage')
+    .setDescription('使用量・クレジットの確認先を表示する'),
 ].map((command) => command.toJSON());
 
 function lastStderrLine(stderr: string): string | null {
@@ -75,6 +101,30 @@ function lastStderrLine(stderr: string): string | null {
     .map((line) => line.trim())
     .filter((line) => line !== '');
   return lines.length > 0 ? lines[lines.length - 1]! : null;
+}
+
+function buildPrompt(
+  prompt: string,
+  files: SavedAttachment[],
+  errors: string[],
+): string {
+  const lines = [
+    'If you need to return files to the user, append [[attach:relative/path]] for each file at the end of your answer. Only files under the current working directory can be returned.',
+  ];
+
+  if (files.length > 0) {
+    lines.push('', 'Attached files:');
+    for (const file of files) {
+      lines.push(`- ${file.path} (${file.type}, ${file.size} bytes)`);
+    }
+  }
+
+  if (errors.length > 0) {
+    lines.push('', `Attachment errors: ${errors.join('; ')}`);
+  }
+
+  lines.push('', 'User message:', prompt === '' ? '(no text; see the attached files)' : prompt);
+  return lines.join('\n');
 }
 
 export class Bot {
@@ -156,7 +206,8 @@ export class Bot {
       if (!this.isAllowedChannel(message.channelId)) return;
 
       const prompt = message.content.trim();
-      if (prompt === '') return;
+      const attachments = [...message.attachments.values()];
+      if (prompt === '' && attachments.length === 0) return;
 
       const ui = this.messageUi(message);
       if (!ui) {
@@ -164,7 +215,7 @@ export class Bot {
         return;
       }
 
-      await this.handlePrompt(message.channelId, prompt, ui);
+      await this.handlePrompt(message.channelId, prompt, ui, attachments, message.id);
     } catch (error) {
       logger.error(`メッセージ処理に失敗しました: ${errorMessage(error)}`);
     }
@@ -193,6 +244,14 @@ export class Bot {
           content,
           allowedMentions: { parse: [] },
         });
+      },
+      sendFiles: async (files) => {
+        for (let index = 0; index < files.length; index += 10) {
+          await channel.send({
+            files: attachmentBuilders(files.slice(index, index + 10)),
+            allowedMentions: { parse: [] },
+          });
+        }
       },
     };
   }
@@ -231,6 +290,12 @@ export class Bot {
           break;
         case 'stop':
           await this.handleStop(interaction);
+          break;
+        case 'model':
+          await this.handleModel(interaction);
+          break;
+        case 'usage':
+          await this.handleUsage(interaction);
           break;
         default:
           break;
@@ -278,9 +343,17 @@ export class Bot {
           allowedMentions: { parse: [] },
         });
       },
+      sendFiles: async (files) => {
+        for (let index = 0; index < files.length; index += 10) {
+          await interaction.followUp({
+            files: attachmentBuilders(files.slice(index, index + 10)),
+            allowedMentions: { parse: [] },
+          });
+        }
+      },
     };
 
-    await this.handlePrompt(interaction.channelId, prompt, ui);
+    await this.handlePrompt(interaction.channelId, prompt, ui, [], null);
   }
 
   private async handleNew(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -310,12 +383,59 @@ export class Bot {
     }
   }
 
+  private async handleModel(interaction: ChatInputCommandInteraction): Promise<void> {
+    const record = this.sessions.get(interaction.channelId, this.config.defaultCwd);
+    const input = interaction.options.getString('model')?.trim();
+    const current = record.model ?? this.config.defaultModel;
+
+    if (!input) {
+      await interaction.reply({
+        content: `model: ${current ? `\`${current}\`` : 'デフォルト'}\n変更は \`/model model:<id>\`、解除は \`/model model:default\`。`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (input === 'default' || input === 'reset') {
+      await this.sessions.setModel(interaction.channelId, null);
+      await interaction.reply({
+        content: `model をデフォルトに戻しました${this.config.defaultModel ? ` (\`${this.config.defaultModel}\`)` : ''}。次のメッセージから適用されます。`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (!/^[A-Za-z0-9._:/-]+$/.test(input)) {
+      await interaction.reply({
+        content: `モデル ID の形式が不正です: \`${input}\``,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    await this.sessions.setModel(interaction.channelId, input);
+    await interaction.reply({
+      content: `model を \`${input}\` に変更しました。次のメッセージから適用されます。`,
+      ephemeral: true,
+    });
+  }
+
+  private async handleUsage(interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.reply({
+      content:
+        '使用量・クレジットは対話モードの `/usage` か https://commandcode.ai/usage で確認できます。ヘッドレス実行からは実数値を取得できません。',
+      ephemeral: true,
+    });
+  }
+
   private async handleStatus(interaction: ChatInputCommandInteraction): Promise<void> {
     const record = this.sessions.get(interaction.channelId, this.config.defaultCwd);
+    const model = record.model ?? this.config.defaultModel;
     const running = this.active.has(interaction.channelId);
     const lines = [
       `cwd: \`${record.cwd}\``,
       `session: ${record.sessionId ? `\`${record.sessionId}\`` : 'なし'}`,
+      `model: ${model ? `\`${model}\`` : 'デフォルト'}`,
       `状態: ${running ? '実行中' : '待機中'}`,
       `同時実行上限: ${this.config.maxConcurrency}`,
       `稼働時間: ${formatDuration(Date.now() - this.startedAt)}`,
@@ -340,12 +460,24 @@ export class Bot {
     channelId: string,
     prompt: string,
     ui: PromptUi,
+    attachments: Attachment[] = [],
+    messageId: string | null = null,
   ): Promise<void> {
     const progressUi = await this.safeCreateProgress(ui);
 
     const job = this.queue.run(channelId, async () => {
       const record = this.sessions.get(channelId, this.config.defaultCwd);
       await this.ensureCwd(record.cwd);
+
+      let saved: SavedAttachment[] = [];
+      let attachmentErrors: string[] = [];
+      if (attachments.length > 0 && messageId) {
+        const attachmentResult = await saveAttachments(attachments, record.cwd, messageId);
+        saved = attachmentResult.saved;
+        attachmentErrors = attachmentResult.errors;
+      }
+      const effectivePrompt = buildPrompt(prompt, saved, attachmentErrors);
+      const model = record.model ?? this.config.defaultModel;
 
       const controller = new AbortController();
       this.active.set(channelId, controller);
@@ -354,13 +486,14 @@ export class Bot {
 
       try {
         logger.info(
-          `実行開始 channel=${channelId} cwd=${record.cwd} resume=${record.sessionId ? 'yes' : 'no'}`,
+          `実行開始 channel=${channelId} cwd=${record.cwd} resume=${record.sessionId ? 'yes' : 'no'} model=${model ?? 'default'} attachments=${saved.length}`,
         );
         const run = await runCmd({
           cmdBin: this.config.cmdBin,
-          prompt,
+          prompt: effectivePrompt,
           cwd: record.cwd,
           sessionId: record.sessionId,
+          model,
           maxTurns: this.config.maxTurns,
           signal: controller.signal,
           onEvent: (event) => progress.handleEvent(event),
@@ -368,7 +501,7 @@ export class Bot {
         logger.info(
           `実行終了 channel=${channelId} exit=${run.exitCode} duration=${run.durationMs}ms`,
         );
-        await this.completeRun(channelId, run, ui, progress);
+        await this.completeRun(channelId, run, ui, progress, record.cwd);
       } finally {
         if (this.active.get(channelId) === controller) {
           this.active.delete(channelId);
@@ -416,9 +549,17 @@ export class Bot {
     run: RunResult,
     ui: PromptUi,
     progress: Progress,
+    cwd: string,
   ): Promise<void> {
     const result: ResultPayload | null = run.result;
-    const finalText = result?.finalText?.trim() ?? '';
+    const rawText = result?.finalText?.trim() ?? '';
+    const extracted: ExtractResult =
+      rawText === ''
+        ? { text: '', files: [], errors: [] }
+        : await extractAttachmentMarkers(rawText, cwd);
+    const finalText = extracted.text;
+    const files = run.aborted ? [] : extracted.files;
+    const fileErrors = extracted.errors;
     let answer: string | null = null;
     let status: string;
 
@@ -452,6 +593,10 @@ export class Bot {
       }
     }
 
+    if (files.length > 0) {
+      status += `\n添付: ${files.length} ファイル`;
+    }
+
     await progress.finish(truncate(status, 1900));
 
     if (result?.error?.includes('No session') && !run.sessionId) {
@@ -469,6 +614,31 @@ export class Bot {
           logger.error(`応答の投稿に失敗しました: ${errorMessage(error)}`);
           break;
         }
+      }
+    }
+
+    if (files.length > 0) {
+      try {
+        await ui.sendFiles(files);
+      } catch (error) {
+        logger.error(`ファイルの送信に失敗しました: ${errorMessage(error)}`);
+        try {
+          await ui.sendAnswer(
+            truncate(`ファイル送信に失敗しました: ${errorMessage(error)}`, 1900),
+          );
+        } catch {
+          // ignore secondary failures
+        }
+      }
+    }
+
+    if (fileErrors.length > 0) {
+      try {
+        await ui.sendAnswer(
+          truncate(`添付できなかったファイル: ${fileErrors.join(', ')}`, 1900),
+        );
+      } catch {
+        // ignore secondary failures
       }
     }
   }

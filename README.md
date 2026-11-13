@@ -5,10 +5,11 @@
 ## 現在の状態
 
 - `kanon-server`（i5-3570 / 8GB / SSD 128GB + HDD 250GB）に Ubuntu Server 24.04.5 を構築済み。
-- bot は TypeScript + discord.js で実装済み。ユニットテスト 24 件が通る。
+- bot は TypeScript + discord.js で実装済み。ユニットテスト 28 件が通る。
 - Nix flake で開発環境と実行パッケージを管理。サーバーでは `nix build` の成果物を systemd から起動する。
 - `cmd` 1.88.5 を `cmdbot` ユーザーに導入し、ヘッドレスログインと `cmd -p` の動作を確認済み。
-- 残り: Discord アプリのトークン/ID を `.env` に設定し、systemd サービスを起動して動作確認。
+- `kanon-server` 上で systemd サービスとして稼働中。Discord に接続し、7 コマンドを登録済み。
+- 残り: 物理/BIOS 側の静音化（Radeon 取り外し、Smart Fan Silent）。
 
 ## 方針
 
@@ -60,8 +61,17 @@
 | `/ask prompt:<text>` | 同上（スラッシュ版） |
 | `/new` | セッションを捨てて新規に切る |
 | `/cwd <path>` | 作業ディレクトリを変更（許可ルート配下のみ） |
-| `/status` | 現在の cwd / sessionId / 実行状態 |
+| `/model [model:<id>]` | チャンネルのモデルを表示・変更（`default` で解除） |
+| `/status` | 現在の cwd / sessionId / model / 実行状態 |
 | `/stop` | 実行中のプロセスを kill |
+| `/usage` | 使用量・クレジットの確認先を表示 |
+
+## ファイルの受け渡し
+
+- メッセージに添付したファイルは `<cwd>/.discord-uploads/` に保存され、cmd にパスが渡されます。
+- cmd が回答の末尾に `[[attach:relative/path]]` を含めると、そのファイルを Discord に返します。
+- 返却できるのは cwd 配下の通常ファイルのみ。`.env`、`.git`、`node_modules` などは拒否します。
+- 1 ファイル 24MB、最大 10 ファイルまで。
 
 ## 環境変数
 
@@ -77,6 +87,7 @@
 | `MAX_CONCURRENCY` | 同時に走らせる cmd の上限 |
 | `SESSIONS_FILE` | セッション状態の保存先 |
 | `DISCORD_GUILD_ID` | スラッシュコマンドを即時登録するギルド ID |
+| `CMD_MODEL` | 既定モデル（`/model` でチャンネルごとに上書き可能） |
 
 ## 開発
 
@@ -103,6 +114,6 @@ sudo systemctl restart commandcode-discordbot
 
 ## 次のステップ
 
-1. Discord アプリを作成し、`.env` にトークン/ID を設定
-2. systemd で起動して動作確認
-3. BIOS と物理作業で静音化（Radeon 取り外し、Smart Fan Silent）
+1. Discord で `/status` とプロンプトを試す
+2. BIOS と物理作業で静音化（Radeon 取り外し、Smart Fan Silent）
+3. 必要に応じてモデル・添付ファイルの運用を調整

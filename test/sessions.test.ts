@@ -16,15 +16,21 @@ test('session ids and cwd survive a reload', async () => {
 
     await store.setCwd('channel-1', '/srv/work/repo');
     await store.setSessionId('channel-1', 'session-1');
+    await store.setModel('channel-1', 'deepseek/deepseek-v4-flash');
 
     const reloaded = await SessionStore.load(file);
     const loaded = reloaded.get('channel-1', '/fallback');
     assert.equal(loaded.cwd, '/srv/work/repo');
     assert.equal(loaded.sessionId, 'session-1');
+    assert.equal(loaded.model, 'deepseek/deepseek-v4-flash');
+
+    await reloaded.setCwd('channel-1', '/srv/work/other');
+    assert.equal(reloaded.get('channel-1', '/fallback').model, 'deepseek/deepseek-v4-flash');
 
     await reloaded.clearSession('channel-1');
     const cleared = await SessionStore.load(file);
     assert.equal(cleared.get('channel-1', '/fallback').sessionId, null);
+    assert.equal(cleared.get('channel-1', '/fallback').model, 'deepseek/deepseek-v4-flash');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

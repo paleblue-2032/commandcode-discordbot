@@ -5,6 +5,7 @@ import { errorMessage, logger } from './logger.js';
 export interface SessionRecord {
   cwd: string;
   sessionId: string | null;
+  model: string | null;
   updatedAt: string;
 }
 
@@ -17,8 +18,9 @@ function isObject(value: unknown): value is Record<string, unknown> {
 function normalizeRecord(value: unknown): SessionRecord | null {
   if (!isObject(value) || typeof value.cwd !== 'string') return null;
   const sessionId = typeof value.sessionId === 'string' && value.sessionId !== '' ? value.sessionId : null;
+  const model = typeof value.model === 'string' && value.model !== '' ? value.model : null;
   const updatedAt = typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString();
-  return { cwd: value.cwd, sessionId, updatedAt };
+  return { cwd: value.cwd, sessionId, model, updatedAt };
 }
 
 export class SessionStore {
@@ -53,6 +55,7 @@ export class SessionStore {
     const created: SessionRecord = {
       cwd: defaultCwd,
       sessionId: null,
+      model: null,
       updatedAt: new Date().toISOString(),
     };
     this.data[channelId] = created;
@@ -60,7 +63,21 @@ export class SessionStore {
   }
 
   async setCwd(channelId: string, cwd: string): Promise<void> {
-    this.data[channelId] = { cwd, sessionId: null, updatedAt: new Date().toISOString() };
+    const existing = this.data[channelId];
+    this.data[channelId] = {
+      cwd,
+      sessionId: null,
+      model: existing?.model ?? null,
+      updatedAt: new Date().toISOString(),
+    };
+    await this.persist();
+  }
+
+  async setModel(channelId: string, model: string | null): Promise<void> {
+    const record = this.data[channelId];
+    if (!record || record.model === model) return;
+    record.model = model;
+    record.updatedAt = new Date().toISOString();
     await this.persist();
   }
 
