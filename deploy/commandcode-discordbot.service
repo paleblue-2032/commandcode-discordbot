@@ -1,0 +1,24 @@
+[Unit]
+Description=Command Code Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cmdbot
+Group=cmdbot
+WorkingDirectory=/srv/commandcode-discordbot
+EnvironmentFile=/srv/commandcode-discordbot/.env
+Environment=HOME=/home/cmdbot
+Environment=PATH=/home/cmdbot/.npm-global/bin:/home/cmdbot/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/srv/commandcode-discordbot/result/bin/commandcode-discordbot
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/work /srv/commandcode-discordbot /home/cmdbot/.commandcode /home/cmdbot/.cache
+UMask=0002
+
+[Install]
+WantedBy=multi-user.target
