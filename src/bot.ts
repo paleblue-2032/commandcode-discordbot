@@ -7,6 +7,7 @@ import {
   MessageFlags,
   SlashCommandBuilder,
   type Attachment,
+  type AutocompleteInteraction,
   type ChatInputCommandInteraction,
   type Interaction,
   type Message,
@@ -22,6 +23,7 @@ import {
 import type { Config } from './config.js';
 import { formatDuration, splitMessage, stripAnsi, truncate } from './format.js';
 import { errorMessage, logger } from './logger.js';
+import { listModels, type ModelInfo } from './models.js';
 import { resolveDirectory } from './paths.js';
 import { Progress } from './progress.js';
 import { ChannelQueue } from './queue.js';
@@ -59,6 +61,8 @@ function attachmentBuilders(files: FileToSend[]): AttachmentBuilder[] {
   );
 }
 
+const EFFORTS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
 const COMMANDS = [
   new SlashCommandBuilder()
     .setName('ask')
@@ -77,11 +81,19 @@ const COMMANDS = [
     ),
   new SlashCommandBuilder()
     .setName('model')
-    .setDescription('使用するモデルを変更する')
+    .setDescription('モデルと推論の強さを表示・変更する')
     .addStringOption((option) =>
       option
         .setName('model')
-        .setDescription('モデル ID（省略で表示、default で解除）')
+        .setDescription('モデル ID（入力で候補を絞り込み）')
+        .setAutocomplete(true)
+        .setRequired(false),
+    )
+    .addStringOption((option) =>
+      option
+        .setName('effort')
+        .setDescription('推論の強さ（off / low / medium / high / xhigh / max）')
+        .setAutocomplete(true)
         .setRequired(false),
     ),
   new SlashCommandBuilder()
@@ -139,6 +151,10 @@ export class Bot {
   private readonly queue: ChannelQueue;
   private readonly active = new Map<string, AbortController>();
   private readonly startedAt = Date.now();
+  private modelCache: ModelInfo[] | null = null;
+  private modelCacheAt = 0;
+  private modelLoad: Promise<ModelInfo[]> | null = null;
+  private modelFailureAt = 0;
 
   constructor(
     private readonly config: Config,
@@ -187,6 +203,8 @@ export class Bot {
     } catch (error) {
       logger.error(`スラッシュコマンドの登録に失敗しました: ${errorMessage(error)}`);
     }
+
+    void this.getModels();
   }
 
   private isAllowedUser(userId: string): boolean {
@@ -258,6 +276,10 @@ export class Bot {
   }
 
   private async onInteraction(interaction: Interaction): Promise<void> {
+    if (interaction.isAutocomplete()) {
+      await this.onAutocomplete(interaction);
+      return;
+    }
     if (!interaction.isChatInputCommand()) return;
 
     try {
@@ -314,6 +336,125 @@ export class Bot {
         // ignore secondary failures
       }
     }
+  }
+
+  private async onAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
+    try {
+      if (
+        !this.isAllowedUser(interaction.user.id) ||
+        !this.isAllowedChannel(interaction.channelId)
+      ) {
+        await interaction.respond([]);
+        return;
+      }
+      if (interaction.commandName !== 'model') {
+        await interaction.respond([]);
+        return;
+      }
+
+      const focused = interaction.options.getFocused(true);
+      const query = String(focused.value ?? '').toLowerCase();
+
+      if (focused.name === 'effort') {
+        const record = this.sessions.get(interaction.channelId, this.config.defaultCwd);
+        const current = record.effort ?? this.config.defaultEffort;
+        const values = new Map<string, string>();
+        if (current && current.includes(query)) {
+          values.set(current, `${current} (現在)`);
+        }
+        if ('default'.includes(query)) {
+          values.set('default', 'default (既定に戻す)');
+        }
+        for (const level of EFFORTS) {
+          if (level.includes(query)) values.set(level, level);
+        }
+        await interaction.respond(
+          [...values.entries()]
+            .slice(0, 25)
+            .map(([value, name]) => ({ name, value })),
+        );
+        return;
+      }
+
+      if (focused.name !== 'model') {
+        await interaction.respond([]);
+        return;
+      }
+
+      const record = this.sessions.get(interaction.channelId, this.config.defaultCwd);
+      const current = record.model ?? this.config.defaultModel;
+      const models = await this.getModelsWithTimeout();
+      const choices = new Map<string, string>();
+
+      if (current && current.toLowerCase().includes(query)) {
+        choices.set(current, truncate(`${current} (現在)`, 100));
+      }
+      if ('default'.includes(query)) {
+        choices.set('default', 'default (既定に戻す)');
+      }
+      for (const model of models) {
+        if (!model.id.toLowerCase().includes(query)) continue;
+        if (choices.has(model.id)) continue;
+        choices.set(
+          model.id,
+          truncate(`${model.id} — ${model.description}`, 100),
+        );
+        if (choices.size >= 25) break;
+      }
+
+      await interaction.respond(
+        [...choices.entries()]
+          .slice(0, 25)
+          .map(([value, name]) => ({ name, value })),
+      );
+    } catch (error) {
+      logger.error(`autocomplete に失敗しました: ${errorMessage(error)}`);
+      try {
+        await interaction.respond([]);
+      } catch {
+        // ignore secondary failures
+      }
+    }
+  }
+
+  private async getModels(): Promise<ModelInfo[]> {
+    const now = Date.now();
+    if (this.modelCache && now - this.modelCacheAt < 10 * 60 * 1000) {
+      return this.modelCache;
+    }
+    if (now - this.modelFailureAt < 60 * 1000) {
+      return [];
+    }
+    if (this.modelLoad) {
+      return this.modelLoad;
+    }
+
+    this.modelLoad = listModels(this.config.cmdBin, this.config.defaultCwd)
+      .then((models) => {
+        this.modelCache = models;
+        this.modelCacheAt = Date.now();
+        return models;
+      })
+      .catch((error: unknown) => {
+        this.modelFailureAt = Date.now();
+        logger.warn(`モデル一覧を取得できませんでした: ${errorMessage(error)}`);
+        return [];
+      })
+      .finally(() => {
+        this.modelLoad = null;
+      });
+
+    return this.modelLoad;
+  }
+
+  private async getModelsWithTimeout(): Promise<ModelInfo[]> {
+    return Promise.race([
+      this.getModels(),
+      new Promise<ModelInfo[]>((resolve) => {
+        const timer = setTimeout(() => resolve([]), 2400);
+        timer.unref();
+      }),
+    ]);
   }
 
   private async handleAsk(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -385,38 +526,62 @@ export class Bot {
   }
 
   private async handleModel(interaction: ChatInputCommandInteraction): Promise<void> {
+    const modelInputRaw = interaction.options.getString('model');
+    const effortInputRaw = interaction.options.getString('effort');
+    const modelInput = modelInputRaw === null ? null : modelInputRaw.trim();
+    const effortInput =
+      effortInputRaw === null ? null : effortInputRaw.trim().toLowerCase();
+
+    let nextModel: string | null | undefined;
+    if (modelInput !== null && modelInput !== '') {
+      if (modelInput === 'default' || modelInput === 'reset') {
+        nextModel = null;
+      } else if (!/^[A-Za-z0-9._:/-]+$/.test(modelInput)) {
+        await interaction.reply({
+          content: `モデル ID の形式が不正です: \`${modelInput}\``,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      } else {
+        nextModel = modelInput;
+      }
+    }
+
+    let nextEffort: string | null | undefined;
+    if (effortInput !== null && effortInput !== '') {
+      if (effortInput === 'default' || effortInput === 'reset') {
+        nextEffort = null;
+      } else if (!(EFFORTS as readonly string[]).includes(effortInput)) {
+        await interaction.reply({
+          content: `effort は ${EFFORTS.join(' / ')} のいずれかです。`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      } else {
+        nextEffort = effortInput;
+      }
+    }
+
+    if (nextModel !== undefined) {
+      await this.sessions.setModel(interaction.channelId, nextModel);
+    }
+    if (nextEffort !== undefined) {
+      await this.sessions.setEffort(interaction.channelId, nextEffort);
+    }
+
     const record = this.sessions.get(interaction.channelId, this.config.defaultCwd);
-    const input = interaction.options.getString('model')?.trim();
-    const current = record.model ?? this.config.defaultModel;
-
-    if (!input) {
-      await interaction.reply({
-        content: `model: ${current ? `\`${current}\`` : 'デフォルト'}\n変更は \`/model model:<id>\`、解除は \`/model model:default\`。`,
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-
-    if (input === 'default' || input === 'reset') {
-      await this.sessions.setModel(interaction.channelId, null);
-      await interaction.reply({
-        content: `model をデフォルトに戻しました${this.config.defaultModel ? ` (\`${this.config.defaultModel}\`)` : ''}。次のメッセージから適用されます。`,
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-
-    if (!/^[A-Za-z0-9._:/-]+$/.test(input)) {
-      await interaction.reply({
-        content: `モデル ID の形式が不正です: \`${input}\``,
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-
-    await this.sessions.setModel(interaction.channelId, input);
+    const model = record.model ?? this.config.defaultModel;
+    const effort = record.effort ?? this.config.defaultEffort;
+    const changed = nextModel !== undefined || nextEffort !== undefined;
+    const lines = [
+      `model: ${model ? `\`${model}\`` : 'デフォルト'}`,
+      `effort: ${effort ? `\`${effort}\`` : 'デフォルト'}`,
+      changed
+        ? '次のメッセージから適用されます。'
+        : '変更するには model / effort を指定してください（候補から選択できます）。',
+    ];
     await interaction.reply({
-      content: `model を \`${input}\` に変更しました。次のメッセージから適用されます。`,
+      content: lines.join('\n'),
       flags: MessageFlags.Ephemeral,
     });
   }
@@ -432,11 +597,13 @@ export class Bot {
   private async handleStatus(interaction: ChatInputCommandInteraction): Promise<void> {
     const record = this.sessions.get(interaction.channelId, this.config.defaultCwd);
     const model = record.model ?? this.config.defaultModel;
+    const effort = record.effort ?? this.config.defaultEffort;
     const running = this.active.has(interaction.channelId);
     const lines = [
       `cwd: \`${record.cwd}\``,
       `session: ${record.sessionId ? `\`${record.sessionId}\`` : 'なし'}`,
       `model: ${model ? `\`${model}\`` : 'デフォルト'}`,
+      `effort: ${effort ? `\`${effort}\`` : 'デフォルト'}`,
       `状態: ${running ? '実行中' : '待機中'}`,
       `同時実行上限: ${this.config.maxConcurrency}`,
       `稼働時間: ${formatDuration(Date.now() - this.startedAt)}`,
@@ -479,6 +646,7 @@ export class Bot {
       }
       const effectivePrompt = buildPrompt(prompt, saved, attachmentErrors);
       const model = record.model ?? this.config.defaultModel;
+      const effort = record.effort ?? this.config.defaultEffort;
 
       const controller = new AbortController();
       this.active.set(channelId, controller);
@@ -487,7 +655,7 @@ export class Bot {
 
       try {
         logger.info(
-          `実行開始 channel=${channelId} cwd=${record.cwd} resume=${record.sessionId ? 'yes' : 'no'} model=${model ?? 'default'} attachments=${saved.length}`,
+          `実行開始 channel=${channelId} cwd=${record.cwd} resume=${record.sessionId ? 'yes' : 'no'} model=${model ?? 'default'} effort=${effort ?? 'default'} attachments=${saved.length}`,
         );
         const run = await runCmd({
           cmdBin: this.config.cmdBin,
@@ -495,6 +663,7 @@ export class Bot {
           cwd: record.cwd,
           sessionId: record.sessionId,
           model,
+          effort,
           maxTurns: this.config.maxTurns,
           signal: controller.signal,
           onEvent: (event) => progress.handleEvent(event),

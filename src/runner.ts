@@ -19,6 +19,7 @@ export interface RunOptions {
   cwd: string;
   sessionId?: string | null;
   model?: string | null;
+  effort?: string | null;
   maxTurns?: number | null;
   onEvent?: (event: AgentEvent) => void;
   signal?: AbortSignal;
@@ -77,6 +78,9 @@ export function buildArgs(options: RunOptions): string[] {
   }
   if (options.model) {
     args.push('-m', options.model);
+  }
+  if (options.effort) {
+    args.push('--effort', options.effort);
   }
   if (options.maxTurns) {
     args.push('--max-turns', String(options.maxTurns));

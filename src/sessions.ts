@@ -6,6 +6,7 @@ export interface SessionRecord {
   cwd: string;
   sessionId: string | null;
   model: string | null;
+  effort: string | null;
   updatedAt: string;
 }
 
@@ -19,8 +20,9 @@ function normalizeRecord(value: unknown): SessionRecord | null {
   if (!isObject(value) || typeof value.cwd !== 'string') return null;
   const sessionId = typeof value.sessionId === 'string' && value.sessionId !== '' ? value.sessionId : null;
   const model = typeof value.model === 'string' && value.model !== '' ? value.model : null;
+  const effort = typeof value.effort === 'string' && value.effort !== '' ? value.effort : null;
   const updatedAt = typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString();
-  return { cwd: value.cwd, sessionId, model, updatedAt };
+  return { cwd: value.cwd, sessionId, model, effort, updatedAt };
 }
 
 export class SessionStore {
@@ -56,6 +58,7 @@ export class SessionStore {
       cwd: defaultCwd,
       sessionId: null,
       model: null,
+      effort: null,
       updatedAt: new Date().toISOString(),
     };
     this.data[channelId] = created;
@@ -68,6 +71,7 @@ export class SessionStore {
       cwd,
       sessionId: null,
       model: existing?.model ?? null,
+      effort: existing?.effort ?? null,
       updatedAt: new Date().toISOString(),
     };
     await this.persist();
@@ -77,6 +81,14 @@ export class SessionStore {
     const record = this.data[channelId];
     if (!record || record.model === model) return;
     record.model = model;
+    record.updatedAt = new Date().toISOString();
+    await this.persist();
+  }
+
+  async setEffort(channelId: string, effort: string | null): Promise<void> {
+    const record = this.data[channelId];
+    if (!record || record.effort === effort) return;
+    record.effort = effort;
     record.updatedAt = new Date().toISOString();
     await this.persist();
   }

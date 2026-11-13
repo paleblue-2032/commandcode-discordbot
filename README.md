@@ -5,7 +5,7 @@
 ## 現在の状態
 
 - `kanon-server`（i5-3570 / 8GB / SSD 128GB + HDD 250GB）に Ubuntu Server 24.04.5 を構築済み。
-- bot は TypeScript + discord.js で実装済み。ユニットテスト 28 件が通る。
+- bot は TypeScript + discord.js で実装済み。ユニットテスト 31 件が通る。
 - Nix flake で開発環境と実行パッケージを管理。サーバーでは `nix build` の成果物を systemd から起動する。
 - `cmd` 1.88.5 を `cmdbot` ユーザーに導入し、ヘッドレスログインと `cmd -p` の動作を確認済み。
 - `kanon-server` 上で systemd サービスとして稼働中。Discord に接続し、7 コマンドを登録済み。
@@ -61,10 +61,12 @@
 | `/ask prompt:<text>` | 同上（スラッシュ版） |
 | `/new` | セッションを捨てて新規に切る |
 | `/cwd <path>` | 作業ディレクトリを変更（許可ルート配下のみ） |
-| `/model [model:<id>]` | チャンネルのモデルを表示・変更（`default` で解除） |
-| `/status` | 現在の cwd / sessionId / model / 実行状態 |
+| `/model [model:<id>] [effort:<level>]` | モデルと推論の強さを表示・変更（autocomplete、`default` で解除） |
+| `/status` | 現在の cwd / sessionId / model / effort / 実行状態 |
 | `/stop` | 実行中のプロセスを kill |
 | `/usage` | 使用量・クレジットの確認先を表示 |
+
+`/model` の model / effort は候補から選択でき、文字入力で絞り込めます。モデル候補は `cmd --list-models` から取得して 10 分キャッシュします。推論強度は `off` / `low` / `medium` / `high` / `xhigh` / `max` で、モデルが対応している値のみ有効です。
 
 ## ファイルの受け渡し
 
@@ -88,6 +90,7 @@
 | `SESSIONS_FILE` | セッション状態の保存先 |
 | `DISCORD_GUILD_ID` | スラッシュコマンドを即時登録するギルド ID |
 | `CMD_MODEL` | 既定モデル（`/model` でチャンネルごとに上書き可能） |
+| `CMD_EFFORT` | 既定の推論強度（`/model effort:<level>` で上書き可能） |
 
 ## 開発
 

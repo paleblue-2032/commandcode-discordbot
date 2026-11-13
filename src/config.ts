@@ -14,6 +14,7 @@ export interface Config {
   guildId: string | null;
   maxTurns: number | null;
   defaultModel: string | null;
+  defaultEffort: string | null;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -86,5 +87,6 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     guildId: env.DISCORD_GUILD_ID?.trim() || null,
     maxTurns: parseOptionalPositiveInt(env.CMD_MAX_TURNS, 'CMD_MAX_TURNS'),
     defaultModel: env.CMD_MODEL?.trim() || null,
+    defaultEffort: env.CMD_EFFORT?.trim() || null,
   };
 }
