@@ -11,7 +11,6 @@ export interface Config {
   sessionsFile: string;
   progressIntervalMs: number;
   defaultCwd: string;
-  guildId: string | null;
   maxTurns: number | null;
   defaultModel: string | null;
   defaultEffort: string | null;
@@ -42,6 +41,13 @@ function parsePositiveInt(value: string | undefined, fallback: number, name: str
   return parsed;
 }
 
+export function isUserAllowed(
+  allowedUserIds: ReadonlySet<string>,
+  userId: string,
+): boolean {
+  return allowedUserIds.size === 0 || allowedUserIds.has(userId);
+}
+
 function parseOptionalPositiveInt(value: string | undefined, name: string): number | null {
   if (!value?.trim()) return null;
   return parsePositiveInt(value, 1, name);
@@ -51,9 +57,6 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
   const discordToken = required(env, 'DISCORD_TOKEN');
 
   const allowedUserIds = new Set(parseList(env.ALLOWED_USER_IDS));
-  if (allowedUserIds.size === 0) {
-    throw new Error('ALLOWED_USER_IDS が空です。誰でも操作できる状態は許可されません。');
-  }
 
   const allowedChannelIds = new Set(parseList(env.ALLOWED_CHANNEL_IDS));
 
@@ -84,7 +87,6 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     sessionsFile: path.resolve(env.SESSIONS_FILE?.trim() || 'sessions.json'),
     progressIntervalMs: Math.max(1000, progressIntervalMs),
     defaultCwd,
-    guildId: env.DISCORD_GUILD_ID?.trim() || null,
     maxTurns: parseOptionalPositiveInt(env.CMD_MAX_TURNS, 'CMD_MAX_TURNS'),
     defaultModel: env.CMD_MODEL?.trim() || null,
     defaultEffort: env.CMD_EFFORT?.trim() || null,

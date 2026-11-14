@@ -10,6 +10,7 @@
 - [コマンド](#コマンド)
 - [ファイルの受け渡し](#ファイルの受け渡し)
 - [セキュリティ](#セキュリティ)
+- [他のギルドへの導入](#他のギルドへの導入)
 - [環境変数](#環境変数)
 - [ディレクトリ](#ディレクトリ)
 - [開発](#開発)
@@ -20,10 +21,11 @@
 ## 現在の状態
 
 - `kanon-server`（i5-3570 / 8GB / SSD 128GB + HDD 250GB）に Ubuntu Server 24.04.5 を構築済み。
-- bot は TypeScript + discord.js で実装済み。ユニットテスト 31 件が通る。
+- bot は TypeScript + discord.js で実装済み。ユニットテスト 33 件が通る。
 - Nix flake で開発環境と実行パッケージを管理。サーバーでは `nix build` の成果物を systemd から起動する。
 - `cmd` 1.88.5 を `cmdbot` ユーザーに導入し、ヘッドレスログインと `cmd -p` の動作を確認済み。
 - `kanon-server` 上で systemd サービスとして稼働中。Discord に接続し、7 コマンドを登録済み。
+- スラッシュコマンドはグローバル登録。`ALLOWED_USER_IDS` が空なら、参加している全ギルドの全ユーザーが利用できる。
 - Radeon HD 6450 を取り外し、ケースファン停止 + CPU ファン温度カーブで静音化済み。
 - `.env` は root 所有 600、root SSH ログイン無効、ufw は 22/tcp のみ、sudo は運用コマンドのみ NOPASSWD。
 
@@ -88,7 +90,27 @@
 - `~/.commandcode/settings.json` の deny ルールで sudo / systemctl / 秘密ファイルの読み取りを禁止。
 - `sudo` は運用コマンドのみ NOPASSWD。全権限 sudo はパスワードが必要。
 - `dis.txt` などのトークン控えは削除する。
-- `cmd` は `--yolo` で動くため、信頼できるリポジトリとプロンプトだけを渡す。許可ユーザー/チャンネルを限定し、必要なら別ユーザー・別アカウントに分離する。
+- `cmd` は `--yolo` で動くため、招待するギルドと渡すリポジトリ/プロンプトを信頼できるものに限る。既定では参加ギルドの全ユーザーが実行できるので、必要なら `ALLOWED_USER_IDS` / `ALLOWED_CHANNEL_IDS` で制限する。
+
+## 他のギルドへの導入
+
+1. Discord Developer Portal の Bot 設定で **Message Content Intent** を ON にする。
+2. OAuth2 URL Generator で `bot` と `applications.commands` を選び、次の権限を付けて招待する。
+   - チャンネルを見る
+   - メッセージを送信
+   - ファイルを添付
+   - メッセージ履歴を読む
+3. 招待後は追加設定不要。スラッシュコマンドはグローバル登録されるため、どのギルドでもそのまま使える（初回反映まで数分かかることがある）。
+4. `ALLOWED_USER_IDS` を空にすると、参加しているギルドの全ユーザーが利用できる。制限したい場合だけ ID をカンマ区切りで設定する。
+5. cwd / セッション / model はチャンネル単位で保持され、同じチャンネルを使うユーザー間で共有される。`/cwd` の許可ルートはホスト側の `ALLOWED_ROOTS` に従う。
+
+招待 URL の例（`<APPLICATION_ID>` を置き換える）:
+
+```
+https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&permissions=101376&scope=bot%20applications.commands
+```
+
+`101376` は「チャンネルを見る」「メッセージを送信」「ファイルを添付」「メッセージ履歴を読む」の合計。
 
 ## 環境変数
 
@@ -97,13 +119,12 @@
 | 変数 | 内容 |
 | --- | --- |
 | `DISCORD_TOKEN` | Bot トークン（必須） |
-| `ALLOWED_USER_IDS` | 許可する Discord ユーザー ID（カンマ区切り、必須） |
+| `ALLOWED_USER_IDS` | 許可する Discord ユーザー ID（カンマ区切り、任意）。空なら参加ギルドの全ユーザーを許可 |
 | `ALLOWED_CHANNEL_IDS` | 許可するチャンネル ID（空なら全チャンネル） |
 | `ALLOWED_ROOTS` | `/cwd` で移動できるルート（必須） |
 | `CMD_BIN` | `cmd` の絶対パス |
 | `MAX_CONCURRENCY` | 同時に走らせる cmd の上限 |
 | `SESSIONS_FILE` | セッション状態の保存先 |
-| `DISCORD_GUILD_ID` | スラッシュコマンドを即時登録するギルド ID |
 | `CMD_MODEL` | 既定モデル（`/model` でチャンネルごとに上書き可能） |
 | `CMD_EFFORT` | 既定の推論強度（`/model effort:<level>` で上書き可能） |
 
@@ -147,6 +168,7 @@ sudo systemctl restart commandcode-discordbot
 | 症状 | 確認 |
 | --- | --- |
 | bot が反応しない | Message Content Intent、`ALLOWED_USER_IDS` / `ALLOWED_CHANNEL_IDS`、`journalctl -u commandcode-discordbot` |
+| 別ギルドでコマンドが出ない | グローバルコマンドの反映待ち（数分〜最大 1 時間）。`journalctl` で登録ログを確認 |
 | 認証エラー | `sudo -u cmdbot -H env HOME=/home/cmdbot PATH=/home/cmdbot/.npm-global/bin:/home/cmdbot/.nix-profile/bin:/usr/bin:/bin cmd status` |
 | モデルがエラー | `/model` で現在値を確認。モデルが effort に対応しているか確認 |
 | 添付が返らない | cwd 配下か、`.env` / `.git` / `node_modules` ではないか、24MB 以下か |
@@ -155,6 +177,6 @@ sudo systemctl restart commandcode-discordbot
 
 ## 次のステップ
 
-1. Discord の bot ロールを `agent` チャンネルだけに制限する
+1. 招待するギルドを信頼できるものだけに限定する（必要なら `ALLOWED_USER_IDS` でユーザーも制限）
 2. 定期的に `git pull` / `nix build` / `systemctl restart` で更新する
 3. 必要なら CPU クーラーや PSU ファンの交換でさらに静音化する

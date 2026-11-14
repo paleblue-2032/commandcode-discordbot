@@ -20,7 +20,7 @@ import {
   type FileToSend,
   type SavedAttachment,
 } from './attachments.js';
-import type { Config } from './config.js';
+import { isUserAllowed, type Config } from './config.js';
 import { formatDuration, splitMessage, stripAnsi, truncate } from './format.js';
 import { errorMessage, logger } from './logger.js';
 import { listModels, type ModelInfo } from './models.js';
@@ -194,12 +194,17 @@ export class Bot {
         logger.warn('application が取得できないためコマンドを登録できません。');
         return;
       }
-      if (this.config.guildId) {
-        await application.commands.set(COMMANDS, this.config.guildId);
-      } else {
-        await application.commands.set(COMMANDS);
+      for (const guild of client.guilds.cache.values()) {
+        try {
+          await guild.commands.set([]);
+        } catch (error) {
+          logger.warn(
+            `ギルド ${guild.id} の旧コマンドを削除できませんでした: ${errorMessage(error)}`,
+          );
+        }
       }
-      logger.info(`スラッシュコマンドを登録しました: ${COMMANDS.length} 件`);
+      await application.commands.set(COMMANDS);
+      logger.info(`スラッシュコマンドをグローバルに登録しました: ${COMMANDS.length} 件`);
     } catch (error) {
       logger.error(`スラッシュコマンドの登録に失敗しました: ${errorMessage(error)}`);
     }
@@ -208,7 +213,7 @@ export class Bot {
   }
 
   private isAllowedUser(userId: string): boolean {
-    return this.config.allowedUserIds.has(userId);
+    return isUserAllowed(this.config.allowedUserIds, userId);
   }
 
   private isAllowedChannel(channelId: string): boolean {
