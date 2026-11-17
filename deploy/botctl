@@ -8,7 +8,7 @@ usage() {
 usage: botctl <command> <bot>
 
   bot:     commandcode | kosen
-  command: deploy | restart | status | logs | enable | fix-env
+  command: deploy | restart | status | logs | follow | enable | fix-env
 EOF
   exit 2
 }
@@ -62,6 +62,9 @@ case "$action" in
     ;;
   logs)
     journalctl -u "$unit" -n 100 --no-pager
+    ;;
+  follow)
+    journalctl -u "$unit" -n 50 -f
     ;;
   enable)
     systemctl enable "$unit"

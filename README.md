@@ -163,12 +163,13 @@ sudo botctl deploy commandcode   # pull + nix build + restart
 sudo botctl restart commandcode
 sudo botctl status commandcode
 sudo botctl logs commandcode
+sudo botctl follow commandcode   # ログを流し見
 ```
 
 - `.env` は `/srv/commandcode-discordbot/.env`（600、root 所有）。編集は `sudo nano`。
 - systemd unit は `deploy/commandcode-discordbot.service`。
 - `sessions.json` は `/srv/commandcode-discordbot/sessions.json`。
-- 実行中のツール進捗は journald にも出力される。`sudo botctl logs commandcode` で確認し、追跡する場合は `journalctl -fu commandcode-discordbot` を使う。
+- 実行中のツール進捗は journald にも出力される。`sudo botctl follow commandcode` で流し見できる（`adm` グループなら `journalctl -fu commandcode-discordbot` でも可）。
 - `botctl` は `/usr/local/sbin/botctl`（root 所有 755）。toyamakosen-bus-bot と共用で、`commandcode` / `kosen` を切り替える。
 
 ### sudoers
