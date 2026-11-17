@@ -668,7 +668,6 @@ export class Bot {
           sessionId: record.sessionId,
           model,
           effort,
-          maxTurns: this.config.maxTurns,
           signal: controller.signal,
           onEvent: (event) => progress.handleEvent(event),
         });
@@ -746,7 +745,7 @@ export class Bot {
       answer = finalText === '' ? null : finalText;
       if (!answer) status += '\n応答は空でした。';
     } else if (run.exitCode === 0 && result?.subtype === 'max_turns') {
-      status = `最大ターン数に達しました (${formatDuration(run.durationMs)})\nプロンプトを分割するか、CMD_MAX_TURNS を増やしてください。`;
+      status = `最大ターン数に達しました (${formatDuration(run.durationMs)})\nプロンプトを分割してください。`;
       answer = finalText === '' ? null : finalText;
     } else {
       status = `失敗: ${describeExitCode(run.exitCode)} (${formatDuration(run.durationMs)})`;

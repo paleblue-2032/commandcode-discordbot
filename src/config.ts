@@ -11,7 +11,6 @@ export interface Config {
   sessionsFile: string;
   progressIntervalMs: number;
   defaultCwd: string;
-  maxTurns: number | null;
   defaultModel: string | null;
   defaultEffort: string | null;
 }
@@ -48,11 +47,6 @@ export function isUserAllowed(
   return allowedUserIds.size === 0 || allowedUserIds.has(userId);
 }
 
-function parseOptionalPositiveInt(value: string | undefined, name: string): number | null {
-  if (!value?.trim()) return null;
-  return parsePositiveInt(value, 1, name);
-}
-
 export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<Config> {
   const discordToken = required(env, 'DISCORD_TOKEN');
 
@@ -87,7 +81,6 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     sessionsFile: path.resolve(env.SESSIONS_FILE?.trim() || 'sessions.json'),
     progressIntervalMs: Math.max(1000, progressIntervalMs),
     defaultCwd,
-    maxTurns: parseOptionalPositiveInt(env.CMD_MAX_TURNS, 'CMD_MAX_TURNS'),
     defaultModel: env.CMD_MODEL?.trim() || null,
     defaultEffort: env.CMD_EFFORT?.trim() || null,
   };

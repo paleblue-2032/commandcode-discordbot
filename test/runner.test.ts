@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   buildArgs,
   describeExitCode,
+  MAX_TURNS,
   NdjsonParser,
   runCmd,
 } from '../src/runner.js';
@@ -29,7 +30,7 @@ test('NdjsonParser parses a final line without a newline', () => {
   assert.deepEqual(lines, ['{"a":1}']);
 });
 
-test('buildArgs includes resume, model, and max turns', () => {
+test('buildArgs includes resume, model, and the turn limit override', () => {
   const args = buildArgs({
     cmdBin: 'cmd',
     prompt: 'hello',
@@ -37,7 +38,6 @@ test('buildArgs includes resume, model, and max turns', () => {
     sessionId: 'session-1',
     model: 'deepseek/deepseek-v4-flash',
     effort: 'high',
-    maxTurns: 5,
   });
 
   assert.deepEqual(args.slice(0, 2), ['-p', 'hello']);
@@ -47,7 +47,7 @@ test('buildArgs includes resume, model, and max turns', () => {
   assert.equal(args[args.indexOf('--resume') + 1], 'session-1');
   assert.equal(args[args.indexOf('-m') + 1], 'deepseek/deepseek-v4-flash');
   assert.equal(args[args.indexOf('--effort') + 1], 'high');
-  assert.equal(args[args.indexOf('--max-turns') + 1], '5');
+  assert.equal(args[args.indexOf('--max-turns') + 1], String(MAX_TURNS));
 });
 
 test('buildArgs omits resume when no session exists', () => {
@@ -60,7 +60,6 @@ test('buildArgs omits resume when no session exists', () => {
   assert.ok(!args.includes('--resume'));
   assert.ok(!args.includes('-m'));
   assert.ok(!args.includes('--effort'));
-  assert.ok(!args.includes('--max-turns'));
 });
 
 test('describeExitCode returns known meanings', () => {

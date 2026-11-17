@@ -20,10 +20,11 @@ export interface RunOptions {
   sessionId?: string | null;
   model?: string | null;
   effort?: string | null;
-  maxTurns?: number | null;
   onEvent?: (event: AgentEvent) => void;
   signal?: AbortSignal;
 }
+
+export const MAX_TURNS = 1_000_000;
 
 export interface RunResult {
   exitCode: number | null;
@@ -82,6 +83,8 @@ export function buildArgs(options: RunOptions): string[] {
     '--yolo',
     '--trust',
     '--skip-onboarding',
+    '--max-turns',
+    String(MAX_TURNS),
   ];
   if (options.sessionId) {
     args.push('--resume', options.sessionId);
@@ -91,9 +94,6 @@ export function buildArgs(options: RunOptions): string[] {
   }
   if (options.effort) {
     args.push('--effort', options.effort);
-  }
-  if (options.maxTurns) {
-    args.push('--max-turns', String(options.maxTurns));
   }
   return args;
 }
