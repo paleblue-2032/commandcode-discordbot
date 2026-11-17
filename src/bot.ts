@@ -173,6 +173,20 @@ export class Bot {
     this.client.on(Events.Error, (error) => {
       logger.error(`Discord クライアントエラー: ${errorMessage(error)}`);
     });
+    this.client.on(Events.ShardDisconnect, (event, shardId) => {
+      logger.warn(
+        `Discord 切断 shard=${shardId} code=${event.code} reason=${event.reason || 'none'}`,
+      );
+    });
+    this.client.on(Events.ShardError, (error, shardId) => {
+      logger.warn(`Discord 接続エラー shard=${shardId}: ${errorMessage(error)}`);
+    });
+    this.client.on(Events.ShardReconnecting, (shardId) => {
+      logger.info(`Discord に再接続中 shard=${shardId}`);
+    });
+    this.client.on(Events.ShardResume, (shardId, replayed) => {
+      logger.info(`Discord に再接続しました shard=${shardId} replayed=${replayed}`);
+    });
   }
 
   start(): Promise<string> {

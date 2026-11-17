@@ -4,6 +4,7 @@ import { Bot } from './bot.js';
 import { loadConfig } from './config.js';
 import { errorMessage, logger } from './logger.js';
 import { SessionStore } from './sessions.js';
+import { isRecoverableWebSocketError } from './ws-errors.js';
 
 const envFile = process.env.BOT_ENV_FILE
   ? path.resolve(process.env.BOT_ENV_FILE)
@@ -15,6 +16,20 @@ if (existsSync(envFile)) {
     if (!process.env.DISCORD_TOKEN) throw error;
   }
 }
+
+process.on('uncaughtException', (error) => {
+  if (isRecoverableWebSocketError(error)) {
+    logger.warn(`WebSocket 接続エラーを無視して再接続を続けます: ${errorMessage(error)}`);
+    return;
+  }
+  logger.error(`未処理の例外: ${errorMessage(error)}`);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error(`未処理の Promise 拒否: ${errorMessage(reason)}`);
+  process.exit(1);
+});
 
 async function main(): Promise<void> {
   const config = await loadConfig();
