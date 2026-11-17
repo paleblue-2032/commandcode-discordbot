@@ -654,7 +654,9 @@ export class Bot {
 
       const controller = new AbortController();
       this.active.set(channelId, controller);
-      const progress = new Progress(progressUi, this.config.progressIntervalMs);
+      const progress = new Progress(progressUi, this.config.progressIntervalMs, (activity) => {
+        logger.info(`進捗 channel=${channelId} ${activity}`);
+      });
       progress.start();
 
       try {

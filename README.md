@@ -168,6 +168,7 @@ sudo botctl logs commandcode
 - `.env` は `/srv/commandcode-discordbot/.env`（600、root 所有）。編集は `sudo nano`。
 - systemd unit は `deploy/commandcode-discordbot.service`。
 - `sessions.json` は `/srv/commandcode-discordbot/sessions.json`。
+- 実行中のツール進捗は journald にも出力される。`sudo botctl logs commandcode` で確認し、追跡する場合は `journalctl -fu commandcode-discordbot` を使う。
 - `botctl` は `/usr/local/sbin/botctl`（root 所有 755）。toyamakosen-bus-bot と共用で、`commandcode` / `kosen` を切り替える。
 
 ### sudoers

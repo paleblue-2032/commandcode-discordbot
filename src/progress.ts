@@ -100,6 +100,7 @@ export class Progress {
   constructor(
     private readonly target: ProgressTarget,
     intervalMs: number,
+    private readonly onActivity?: (activity: string) => void,
   ) {
     this.editor = new ThrottledEditor((content) => target.edit(content), intervalMs);
   }
@@ -170,6 +171,7 @@ export class Progress {
     if (this.activities.length > MAX_ACTIVITIES * 2) {
       this.activities.splice(0, this.activities.length - MAX_ACTIVITIES);
     }
+    this.onActivity?.(line);
   }
 
   private render(): string {
