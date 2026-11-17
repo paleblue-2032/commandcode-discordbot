@@ -88,7 +88,7 @@
 - bot は `cmdbot` で実行し、systemd の sandbox（`ProtectSystem=strict`、`NoNewPrivileges` など）で動作。
 - `.env` は root 所有 600。トークンは systemd の `EnvironmentFile` 経由でのみ読み、`cmd` 子プロセスには秘密の環境変数を渡さない。
 - `~/.commandcode/settings.json` の deny ルールで sudo / systemctl / 秘密ファイルの読み取りを禁止。
-- `sudo` は運用コマンドのみ NOPASSWD。全権限 sudo はパスワードが必要。
+- `sudo` は運用コマンドのみ NOPASSWD。全権限 sudo はパスワードが必要。運用は `botctl` に一本化している。
 - `dis.txt` などのトークン控えは削除する。
 - `cmd` は `--yolo` で動くため、招待するギルドと渡すリポジトリ/プロンプトを信頼できるものに限る。既定では参加ギルドの全ユーザーが実行できるので、必要なら `ALLOWED_USER_IDS` / `ALLOWED_CHANNEL_IDS` で制限する。
 
@@ -153,15 +153,35 @@ npm run build
 ## デプロイ
 
 ```bash
-sudo -u cmdbot -H git -C /srv/commandcode-discordbot pull --ff-only
-sudo -u cmdbot -H env PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin \
-  bash -c 'cd /srv/commandcode-discordbot && nix build .# --print-build-logs'
-sudo systemctl restart commandcode-discordbot
+sudo botctl deploy commandcode
+```
+
+`botctl` が `git pull` → `nix build` → `systemctl restart` をまとめて実行する。
+
+```bash
+sudo botctl deploy commandcode   # pull + nix build + restart
+sudo botctl restart commandcode
+sudo botctl status commandcode
+sudo botctl logs commandcode
 ```
 
 - `.env` は `/srv/commandcode-discordbot/.env`（600、root 所有）。編集は `sudo nano`。
 - systemd unit は `deploy/commandcode-discordbot.service`。
 - `sessions.json` は `/srv/commandcode-discordbot/sessions.json`。
+- `botctl` は `/usr/local/sbin/botctl`（root 所有 755）。toyamakosen-bus-bot と共用で、`commandcode` / `kosen` を切り替える。
+
+### sudoers
+
+`/etc/sudoers.d/90-cmd-maintenance` は次の 1 行だけ。`env` / `bash` / `nix` / `git` を個別に NOPASSWD で開けると `sudo bash` で実質 root になるため、その形は廃止した。
+
+```
+paleblue_2032 ALL=(root) NOPASSWD: /usr/local/sbin/botctl
+```
+
+- 全権限 sudo は従来どおりパスワード必須。
+- `botctl` の引数は `deploy|restart|status|logs` と `commandcode|kosen` の固定リストのみ。
+- `git` / `nix` はリポジトリの所有者（`cmdbot`）として実行されるので root 所有ファイルはできない。
+- 旧設定は `/root/90-cmd-maintenance.bak.<日時>` に退避済み。
 
 ## トラブルシューティング
 
@@ -169,7 +189,7 @@ sudo systemctl restart commandcode-discordbot
 | --- | --- |
 | bot が反応しない | Message Content Intent、`ALLOWED_USER_IDS` / `ALLOWED_CHANNEL_IDS`、`journalctl -u commandcode-discordbot` |
 | 別ギルドでコマンドが出ない | グローバルコマンドの反映待ち（数分〜最大 1 時間）。`journalctl` で登録ログを確認 |
-| 認証エラー | `sudo -u cmdbot -H env HOME=/home/cmdbot PATH=/home/cmdbot/.npm-global/bin:/home/cmdbot/.nix-profile/bin:/usr/bin:/bin cmd status` |
+| 認証エラー | `sudo botctl logs commandcode` で確認。`cmd status` は `sudo -iu cmdbot` で直接実行する |
 | モデルがエラー | `/model` で現在値を確認。モデルが effort に対応しているか確認 |
 | 添付が返らない | cwd 配下か、`.env` / `.git` / `node_modules` ではないか、24MB 以下か |
 | ファンが回らない | `sensors`、`systemctl status fan-quiet`、`journalctl -u fan-quiet` |
@@ -178,5 +198,5 @@ sudo systemctl restart commandcode-discordbot
 ## 次のステップ
 
 1. 招待するギルドを信頼できるものだけに限定する（必要なら `ALLOWED_USER_IDS` でユーザーも制限）
-2. 定期的に `git pull` / `nix build` / `systemctl restart` で更新する
+2. 定期的に `sudo botctl deploy commandcode` で更新する
 3. 必要なら CPU クーラーや PSU ファンの交換でさらに静音化する
