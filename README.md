@@ -269,9 +269,3 @@ paleblue_2032 ALL=(root) NOPASSWD: /usr/local/sbin/botctl
 | 添付が返らない | cwd 配下か、`.env` / `.git` / `node_modules` ではないか、24MB 以下か |
 | ファンが回らない | `sensors`、`systemctl status fan-quiet`、`journalctl -u fan-quiet` |
 | 温度が高い | `sensors` で package / core を確認。80°C で CPU ファンが段階的に上がる |
-
-## 次のステップ
-
-1. 招待するギルドを信頼できるものだけに限定する（必要なら `ALLOWED_USER_IDS` でユーザーも制限）
-2. 定期的に `sudo botctl deploy commandcode` で更新する
-3. 必要なら CPU クーラーや PSU ファンの交換でさらに静音化する
