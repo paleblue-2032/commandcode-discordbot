@@ -22,6 +22,7 @@ export interface Config {
   smartFile: string;
   workdirMeta: 'thread' | 'always' | 'off';
   cwdConflict: 'deny' | 'warn';
+  requireTrigger: boolean;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -83,6 +84,13 @@ function parseCwdConflict(value: string | undefined): 'deny' | 'warn' {
   if (!normalized) return 'deny';
   if (normalized === 'deny' || normalized === 'warn') return normalized;
   throw new Error(`CWD_CONFLICT は deny か warn を指定してください: ${value}`);
+}
+
+function parseTriggerMode(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === 'prefix') return true;
+  if (normalized === 'all') return false;
+  throw new Error(`TRIGGER_MODE は prefix か all を指定してください: ${value}`);
 }
 
 function parsePercent(value: string | undefined, fallback: number, name: string): number {
@@ -175,5 +183,6 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     ),
     workdirMeta: parseWorkdirMeta(env.WORKDIR_META),
     cwdConflict: parseCwdConflict(env.CWD_CONFLICT),
+    requireTrigger: parseTriggerMode(env.TRIGGER_MODE),
   };
 }

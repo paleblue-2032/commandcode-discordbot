@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   ALL_EFFORTS,
+  effectiveEffort,
   effortsFor,
   isEffortSupported,
 } from '../src/model-caps.js';
@@ -47,4 +48,38 @@ test('the default model supports vision and a cheap cache read', () => {
   if (support.known) {
     assert.ok(support.efforts.includes('high'));
   }
+});
+
+test('a stored effort wins when the model supports it', () => {
+  const result = effectiveEffort('deepseek/deepseek-v4.1-flash', 'high', 'off');
+  assert.deepEqual(result, { effort: 'high', clearStored: false, reason: 'stored' });
+});
+
+test('an unsupported stored effort is cleared', () => {
+  const result = effectiveEffort('deepseek/deepseek-v4.1-flash', 'medium', null);
+  assert.equal(result.effort, null);
+  assert.equal(result.clearStored, true);
+  assert.equal(result.reason, 'stored-unsupported');
+});
+
+test('CMD_EFFORT=off is the fastest default and applies when nothing is stored', () => {
+  const result = effectiveEffort('deepseek/deepseek-v4.1-flash', null, 'off');
+  assert.deepEqual(result, { effort: 'off', clearStored: false, reason: 'default' });
+});
+
+test('an unsupported CMD_EFFORT is skipped without clearing anything', () => {
+  const result = effectiveEffort('Qwen/Qwen3.7-Flash', null, 'off');
+  assert.equal(result.effort, null);
+  assert.equal(result.clearStored, false);
+  assert.equal(result.reason, 'default-unsupported');
+});
+
+test('no stored effort and no default leaves the model to decide', () => {
+  const result = effectiveEffort('deepseek/deepseek-v4.1-flash', null, null);
+  assert.deepEqual(result, { effort: null, clearStored: false, reason: 'none' });
+});
+
+test('unknown models accept any stored effort', () => {
+  const result = effectiveEffort('some/byok-model', 'medium', 'off');
+  assert.deepEqual(result, { effort: 'medium', clearStored: false, reason: 'stored' });
 });

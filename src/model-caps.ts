@@ -115,3 +115,29 @@ export function isEffortSupported(modelId: string | null, effort: string): boole
   if (!support.known) return true;
   return (support.efforts as readonly string[]).includes(effort);
 }
+
+export interface EffectiveEffort {
+  effort: string | null;
+  clearStored: boolean;
+  reason: 'stored' | 'default' | 'none' | 'stored-unsupported' | 'default-unsupported';
+}
+
+export function effectiveEffort(
+  modelId: string | null,
+  storedEffort: string | null,
+  defaultEffort: string | null,
+): EffectiveEffort {
+  if (storedEffort !== null) {
+    if (isEffortSupported(modelId, storedEffort)) {
+      return { effort: storedEffort, clearStored: false, reason: 'stored' };
+    }
+    return { effort: null, clearStored: true, reason: 'stored-unsupported' };
+  }
+  if (defaultEffort !== null) {
+    if (isEffortSupported(modelId, defaultEffort)) {
+      return { effort: defaultEffort, clearStored: false, reason: 'default' };
+    }
+    return { effort: null, clearStored: false, reason: 'default-unsupported' };
+  }
+  return { effort: null, clearStored: false, reason: 'none' };
+}

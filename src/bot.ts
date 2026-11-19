@@ -34,7 +34,7 @@ import {
 } from './discord-context.js';
 import { formatDuration, splitMessage, stripAnsi, truncate } from './format.js';
 import { errorMessage, logger } from './logger.js';
-import { ALL_EFFORTS, effortsFor } from './model-caps.js';
+import { ALL_EFFORTS, effectiveEffort, effortsFor } from './model-caps.js';
 import { listModels, type ModelInfo } from './models.js';
 import { isWithin, resolveDirectory } from './paths.js';
 import { Progress } from './progress.js';
@@ -48,6 +48,7 @@ import {
 } from './runner.js';
 import type { SessionRecord, SessionStore } from './sessions.js';
 import { listCandidates, startStorageSweeper } from './storage-sweeper.js';
+import { parseTrigger } from './trigger.js';
 import { readWorkdirMeta, measureDirectory, upsertWorkdirAgents } from './workdir.js';
 
 interface ProgressUi {
@@ -299,8 +300,22 @@ export class Bot {
       if (!this.isAllowedUser(message.author.id)) return;
       if (!this.isAllowedChannel(message.channelId, ctx?.parentId ?? null)) return;
 
-      const prompt = message.content.trim();
       const attachments = [...message.attachments.values()];
+      const trigger = parseTrigger(
+        message.content,
+        attachments.length,
+        this.config.requireTrigger,
+      );
+      if (!trigger.triggered) {
+        if (trigger.reason === 'attachment-without-prefix') {
+          logger.info(
+            `トリガーなしの添付を無視しました channel=${message.channelId} user=${message.author.id}`,
+          );
+        }
+        return;
+      }
+
+      const prompt = trigger.prompt;
       if (prompt === '' && attachments.length === 0) return;
 
       const ui = channel ? this.channelUi(channel) : null;
@@ -727,7 +742,7 @@ export class Bot {
 
     const updated = this.sessions.get(key, this.config.defaultCwd);
     const model = updated.model ?? this.config.defaultModel;
-    const effort = updated.effort ?? this.config.defaultEffort;
+    const resolved = effectiveEffort(model, updated.effort, this.config.defaultEffort);
     const changed = nextModel !== undefined || nextEffort !== undefined;
     if (changed) {
       logger.info(
@@ -737,11 +752,11 @@ export class Bot {
 
     const effortSupport = effortsFor(model);
     const effortLabel =
-      effort !== null
-        ? `\`${effort}\``
+      resolved.effort !== null
+        ? `\`${resolved.effort}\`${resolved.reason === 'default' ? '（CMD_EFFORT）' : ''}`
         : effortSupport.known && effortSupport.efforts.length === 0
-          ? 'デフォルト（このモデルは effort 非対応）'
-          : 'デフォルト';
+          ? 'なし（このモデルは非対応）'
+          : '未設定（モデル既定）';
 
     const lines = [
       `model: ${model ? `\`${model}\`` : 'デフォルト'}`,
@@ -772,7 +787,8 @@ export class Bot {
     const key = interaction.channelId;
     const record = this.sessions.get(key, this.config.defaultCwd);
     const model = record.model ?? this.config.defaultModel;
-    const effort = record.effort ?? this.config.defaultEffort;
+    const resolvedEffort = effectiveEffort(model, record.effort, this.config.defaultEffort);
+    const effort = resolvedEffort.effort;
     const running = this.active.has(key);
     const waiting = this.queue.depth(key) - (running ? 1 : 0);
     const sourceLabel: Record<SessionRecord['cwdSource'], string> = {
@@ -789,7 +805,7 @@ export class Bot {
       `cwd: \`${record.cwd}\` (${sourceLabel[record.cwdSource]})`,
       `session: ${record.sessionId ? `\`${record.sessionId}\`` : 'なし'}`,
       `model: ${model ? `\`${model}\`` : 'デフォルト'}`,
-      `effort: ${effort ? `\`${effort}\`` : effortSupport.known && effortSupport.efforts.length === 0 ? 'デフォルト（このモデルは非対応）' : 'デフォルト'}`,
+      `effort: ${effort ? `\`${effort}\`${resolvedEffort.reason === 'default' ? '（CMD_EFFORT）' : ''}` : effortSupport.known && effortSupport.efforts.length === 0 ? 'なし（このモデルは非対応）' : '未設定（モデル既定）'}`,
       ...(record.createdAt
         ? [`作成: ${record.createdAt.slice(0, 16).replace('T', ' ')} / 最終作業: ${record.updatedAt.slice(0, 16).replace('T', ' ')}`]
         : [`最終作業: ${record.updatedAt.slice(0, 16).replace('T', ' ')}`]),
@@ -918,16 +934,22 @@ export class Bot {
           nonce: createNonce(),
         });
         const model = record.model ?? this.config.defaultModel;
-        const effort = record.effort ?? this.config.defaultEffort;
+        const resolved = effectiveEffort(
+          model,
+          record.effort,
+          this.config.defaultEffort,
+        );
+        const effortArg = resolved.effort;
 
-        const support = effortsFor(model);
-        const effortArg =
-          effort !== null && (!support.known || support.efforts.length > 0) ? effort : null;
-        if (effort !== null && effortArg === null) {
+        if (resolved.reason === 'stored-unsupported') {
           logger.warn(
-            `effort を無視します（モデル非対応） channel=${key} model=${model ?? 'default'} effort=${effort}`,
+            `effort を解除します（モデル非対応） channel=${key} model=${model ?? 'default'} effort=${record.effort}`,
           );
           await this.sessions.setEffort(key, null);
+        } else if (resolved.reason === 'default-unsupported') {
+          logger.warn(
+            `CMD_EFFORT を無視します（モデル非対応） channel=${key} model=${model ?? 'default'} effort=${this.config.defaultEffort}`,
+          );
         }
 
         const progress = new Progress(progressUi, this.config.progressIntervalMs, (activity) => {

@@ -64,8 +64,9 @@
 
 | 入力 | 動作 |
 | --- | --- |
-| 通常のメッセージ | そのチャンネルのセッションへプロンプトとして送る |
-| `/ask prompt:<text>` | 同上（スラッシュ版） |
+| `!<メッセージ>` | そのチャンネルのセッションへプロンプトとして送る（`!` は除かれる） |
+| `!` なしのメッセージ | **何もしない**（スレッド内の会話に介入しない） |
+| `/ask prompt:<text>` | 同上（スラッシュ版、`!` 不要） |
 | `/new` | セッションを捨てて新規に切る |
 | `/cwd <path>` | 作業ディレクトリを変更（許可ルート配下のみ） |
 | `/model [model:<id>] [effort:<level>]` | モデルと推論の強さを表示・変更（autocomplete、`default` で解除） |
@@ -73,6 +74,12 @@
 | `/storage` | ディスク使用量・SMART 判定・削除候補の表示（dry-run） |
 | `/stop` | 実行中・待機中の処理を取り消す |
 | `/usage` | 使用量・クレジットの確認先を表示 |
+
+### 呼び出し方
+
+通常メッセージは**先頭が `!` のときだけ**実行します。スレッド内で人間同士が会話しても bot は反応しません。添付だけ送る場合も `!` を付けてください（本文なしで `!` だけでも動きます）。
+
+`TRIGGER_MODE=all` にすると従来どおり全メッセージに反応します。
 
 `/model` の model / effort は候補から選択でき、文字入力で絞り込めます。モデル候補は `cmd --list-models` から取得して 10 分キャッシュします。
 
@@ -182,6 +189,7 @@ https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&permissions=1013
 | `SMART_FILE` | `disk-health.timer` が書く SMART スナップショットのパス |
 | `WORKDIR_META` | `AGENTS.md` の自動更新範囲（`thread` / `always` / `off`） |
 | `CWD_CONFLICT` | 使用中ディレクトリへの `/cwd`（`deny` / `warn`） |
+| `TRIGGER_MODE` | `prefix`（`!` 必須、既定）/ `all`（全メッセージに反応） |
 | `CMD_MODEL` | 既定モデル（`/model` でチャンネルごとに上書き可能） |
 | `CMD_EFFORT` | 既定の推論強度（`/model effort:<level>` で上書き可能） |
 
