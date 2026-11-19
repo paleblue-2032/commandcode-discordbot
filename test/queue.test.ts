@@ -56,3 +56,22 @@ test('a failed job does not block the next job on the same channel', async () =>
   const result = await queue.run('a', async () => 'ok');
   assert.equal(result, 'ok');
 });
+
+test('depth counts queued and running jobs per key, then returns to zero', async () => {
+  const queue = new ChannelQueue(1);
+  assert.equal(queue.depth('a'), 0);
+
+  const first = queue.run('a', async () => {
+    await delay(30);
+  });
+  assert.equal(queue.depth('a'), 1);
+
+  const second = queue.run('a', async () => undefined);
+  const other = queue.run('b', async () => undefined);
+  assert.equal(queue.depth('a'), 2);
+  assert.equal(queue.depth('b'), 1);
+
+  await Promise.all([first, second, other]);
+  assert.equal(queue.depth('a'), 0);
+  assert.equal(queue.depth('b'), 0);
+});

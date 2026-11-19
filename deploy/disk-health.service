@@ -1,0 +1,11 @@
+[Unit]
+Description=Write SMART health snapshot for the commandcode-discordbot
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/default/disk-health
+ExecStart=/usr/local/sbin/disk-health
+Nice=19
+IOSchedulingClass=idle

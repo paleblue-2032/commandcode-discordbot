@@ -13,6 +13,15 @@ export interface Config {
   defaultCwd: string;
   defaultModel: string | null;
   defaultEffort: string | null;
+  forumCwd: 'auto' | 'shared';
+  uploadTtlMs: number;
+  uploadSweepIntervalMs: number;
+  storageTargetRatio: number;
+  storageDegradedRatio: number;
+  storageSweepIntervalMs: number;
+  smartFile: string;
+  workdirMeta: 'thread' | 'always' | 'off';
+  cwdConflict: 'deny' | 'warn';
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -38,6 +47,50 @@ function parsePositiveInt(value: string | undefined, fallback: number, name: str
     throw new Error(`${name} は 1 以上の整数で指定してください: ${value}`);
   }
   return parsed;
+}
+
+function parseNonNegativeNumber(
+  value: string | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (!value?.trim()) return fallback;
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${name} は 0 以上の数値で指定してください: ${value}`);
+  }
+  return parsed;
+}
+
+function parseForumCwd(value: string | undefined): 'auto' | 'shared' {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return 'auto';
+  if (normalized === 'auto' || normalized === 'shared') return normalized;
+  throw new Error(`FORUM_CWD は auto か shared を指定してください: ${value}`);
+}
+
+function parseWorkdirMeta(value: string | undefined): 'thread' | 'always' | 'off' {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return 'thread';
+  if (normalized === 'thread' || normalized === 'always' || normalized === 'off') {
+    return normalized;
+  }
+  throw new Error(`WORKDIR_META は thread / always / off を指定してください: ${value}`);
+}
+
+function parseCwdConflict(value: string | undefined): 'deny' | 'warn' {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return 'deny';
+  if (normalized === 'deny' || normalized === 'warn') return normalized;
+  throw new Error(`CWD_CONFLICT は deny か warn を指定してください: ${value}`);
+}
+
+function parsePercent(value: string | undefined, fallback: number, name: string): number {
+  const parsed = parseNonNegativeNumber(value, fallback, name);
+  if (parsed > 100) {
+    throw new Error(`${name} は 0〜100 の範囲で指定してください: ${value}`);
+  }
+  return parsed / 100;
 }
 
 export function isUserAllowed(
@@ -71,17 +124,56 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
     'PROGRESS_INTERVAL_MS',
   );
 
+  const forumCwd = parseForumCwd(env.FORUM_CWD);
+
+  const uploadTtlHours = parseNonNegativeNumber(env.UPLOAD_TTL_HOURS, 24, 'UPLOAD_TTL_HOURS');
+
+  const uploadSweepIntervalMinutes = parsePositiveInt(
+    env.UPLOAD_SWEEP_INTERVAL_MINUTES,
+    60,
+    'UPLOAD_SWEEP_INTERVAL_MINUTES',
+  );
+
+  const storageTargetRatio = parsePercent(env.STORAGE_TARGET_PERCENT, 75, 'STORAGE_TARGET_PERCENT');
+  const storageDegradedRatio = parsePercent(
+    env.STORAGE_DEGRADED_PERCENT,
+    60,
+    'STORAGE_DEGRADED_PERCENT',
+  );
+  if (storageTargetRatio > 0 && storageDegradedRatio >= storageTargetRatio) {
+    throw new Error(
+      `STORAGE_DEGRADED_PERCENT は STORAGE_TARGET_PERCENT より小さくしてください: ${storageDegradedRatio * 100} >= ${storageTargetRatio * 100}`,
+    );
+  }
+
+  const storageSweepIntervalMinutes = parsePositiveInt(
+    env.STORAGE_SWEEP_INTERVAL_MINUTES,
+    60,
+    'STORAGE_SWEEP_INTERVAL_MINUTES',
+  );
+
   return {
     discordToken,
     allowedUserIds,
     allowedChannelIds,
     allowedRoots,
     cmdBin: env.CMD_BIN?.trim() || 'cmd',
-    maxConcurrency: parsePositiveInt(env.MAX_CONCURRENCY, 1, 'MAX_CONCURRENCY'),
+    maxConcurrency: parsePositiveInt(env.MAX_CONCURRENCY, 3, 'MAX_CONCURRENCY'),
     sessionsFile: path.resolve(env.SESSIONS_FILE?.trim() || 'sessions.json'),
     progressIntervalMs: Math.max(1000, progressIntervalMs),
     defaultCwd,
     defaultModel: env.CMD_MODEL?.trim() || null,
     defaultEffort: env.CMD_EFFORT?.trim() || null,
+    forumCwd,
+    uploadTtlMs: Math.round(uploadTtlHours * 60 * 60 * 1000),
+    uploadSweepIntervalMs: Math.max(5, uploadSweepIntervalMinutes) * 60 * 1000,
+    storageTargetRatio,
+    storageDegradedRatio,
+    storageSweepIntervalMs: Math.max(10, storageSweepIntervalMinutes) * 60 * 1000,
+    smartFile: path.resolve(
+      env.SMART_FILE?.trim() || '/var/lib/commandcode-discordbot/smart.json',
+    ),
+    workdirMeta: parseWorkdirMeta(env.WORKDIR_META),
+    cwdConflict: parseCwdConflict(env.CWD_CONFLICT),
   };
 }

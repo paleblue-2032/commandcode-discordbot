@@ -1,13 +1,16 @@
-import { stat } from 'node:fs/promises';
+import { mkdir, realpath, stat } from 'node:fs/promises';
+import path from 'node:path';
 import {
   AttachmentBuilder,
   Client,
   Events,
   GatewayIntentBits,
   MessageFlags,
+  Partials,
   SlashCommandBuilder,
   type Attachment,
   type AutocompleteInteraction,
+  type Channel,
   type ChatInputCommandInteraction,
   type Interaction,
   type Message,
@@ -20,12 +23,22 @@ import {
   type FileToSend,
   type SavedAttachment,
 } from './attachments.js';
+import { startUploadSweeper } from './cleanup.js';
 import { isUserAllowed, type Config } from './config.js';
+import { readDiskStatus } from './disk-health.js';
+import {
+  decideThreadCwd,
+  describeChannel,
+  threadCwdPath,
+  type ChatContext,
+} from './discord-context.js';
 import { formatDuration, splitMessage, stripAnsi, truncate } from './format.js';
 import { errorMessage, logger } from './logger.js';
+import { ALL_EFFORTS, effortsFor } from './model-caps.js';
 import { listModels, type ModelInfo } from './models.js';
-import { resolveDirectory } from './paths.js';
+import { isWithin, resolveDirectory } from './paths.js';
 import { Progress } from './progress.js';
+import { buildPrompt, createNonce } from './prompt.js';
 import { ChannelQueue } from './queue.js';
 import {
   describeExitCode,
@@ -33,7 +46,9 @@ import {
   type ResultPayload,
   type RunResult,
 } from './runner.js';
-import type { SessionStore } from './sessions.js';
+import type { SessionRecord, SessionStore } from './sessions.js';
+import { listCandidates, startStorageSweeper } from './storage-sweeper.js';
+import { readWorkdirMeta, measureDirectory, upsertWorkdirAgents } from './workdir.js';
 
 interface ProgressUi {
   edit(content: string): Promise<unknown>;
@@ -50,9 +65,9 @@ interface SendableChannel {
 }
 
 function isSendable(
-  channel: Message['channel'],
-): channel is Message['channel'] & SendableChannel {
-  return typeof (channel as { send?: unknown }).send === 'function';
+  channel: Channel | null,
+): channel is Channel & SendableChannel {
+  return typeof (channel as { send?: unknown } | null)?.send === 'function';
 }
 
 function attachmentBuilders(files: FileToSend[]): AttachmentBuilder[] {
@@ -61,7 +76,7 @@ function attachmentBuilders(files: FileToSend[]): AttachmentBuilder[] {
   );
 }
 
-const EFFORTS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+const EFFORTS = ALL_EFFORTS;
 
 const COMMANDS = [
   new SlashCommandBuilder()
@@ -78,6 +93,12 @@ const COMMANDS = [
     .setDescription('作業ディレクトリを変更する')
     .addStringOption((option) =>
       option.setName('path').setDescription('許可ルート配下のパス').setRequired(true),
+    )
+    .addBooleanOption((option) =>
+      option
+        .setName('force')
+        .setDescription('他のスレッドが使用中でも変更する')
+        .setRequired(false),
     ),
   new SlashCommandBuilder()
     .setName('model')
@@ -100,6 +121,9 @@ const COMMANDS = [
     .setName('status')
     .setDescription('現在の cwd とセッション状態を表示する'),
   new SlashCommandBuilder()
+    .setName('storage')
+    .setDescription('ディスク使用量と削除候補を表示する'),
+  new SlashCommandBuilder()
     .setName('stop')
     .setDescription('実行中の処理を停止する'),
   new SlashCommandBuilder()
@@ -116,28 +140,13 @@ function lastStderrLine(stderr: string): string | null {
   return lines.length > 0 ? lines[lines.length - 1]! : null;
 }
 
-function buildPrompt(
-  prompt: string,
-  files: SavedAttachment[],
-  errors: string[],
-): string {
-  const lines = [
-    'If you need to return files to the user, append [[attach:relative/path]] for each file at the end of your answer. Only files under the current working directory can be returned.',
-  ];
-
-  if (files.length > 0) {
-    lines.push('', 'Attached files:');
-    for (const file of files) {
-      lines.push(`- ${file.path} (${file.type}, ${file.size} bytes)`);
-    }
+async function fileExists(file: string): Promise<boolean> {
+  try {
+    await stat(file);
+    return true;
+  } catch {
+    return false;
   }
-
-  if (errors.length > 0) {
-    lines.push('', `Attachment errors: ${errors.join('; ')}`);
-  }
-
-  lines.push('', 'User message:', prompt === '' ? '(no text; see the attached files)' : prompt);
-  return lines.join('\n');
 }
 
 export class Bot {
@@ -147,10 +156,14 @@ export class Bot {
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
     ],
+    partials: [Partials.Channel],
   });
   private readonly queue: ChannelQueue;
   private readonly active = new Map<string, AbortController>();
+  private readonly pending = new Map<string, Set<AbortController>>();
   private readonly startedAt = Date.now();
+  private stopSweeper: (() => void) | null = null;
+  private stopStorageSweeper: (() => void) | null = null;
   private modelCache: ModelInfo[] | null = null;
   private modelCacheAt = 0;
   private modelLoad: Promise<ModelInfo[]> | null = null;
@@ -194,6 +207,20 @@ export class Bot {
   }
 
   async stop(): Promise<void> {
+    if (this.stopSweeper) {
+      this.stopSweeper();
+      this.stopSweeper = null;
+    }
+    if (this.stopStorageSweeper) {
+      this.stopStorageSweeper();
+      this.stopStorageSweeper = null;
+    }
+    for (const controllers of this.pending.values()) {
+      for (const controller of controllers) {
+        controller.abort();
+      }
+    }
+    this.pending.clear();
     for (const controller of this.active.values()) {
       controller.abort();
     }
@@ -224,43 +251,100 @@ export class Bot {
     }
 
     void this.getModels();
+
+    if (this.config.uploadTtlMs > 0) {
+      this.stopSweeper = startUploadSweeper(
+        this.config.allowedRoots,
+        this.config.uploadTtlMs,
+        this.config.uploadSweepIntervalMs,
+      );
+      logger.info(
+        `添付の定期削除を開始しました ttl=${Math.round(this.config.uploadTtlMs / 3600000)}時間 interval=${Math.round(this.config.uploadSweepIntervalMs / 60000)}分`,
+      );
+    }
+
+    if (this.config.storageTargetRatio > 0) {
+      this.stopStorageSweeper = startStorageSweeper({
+        workRoot: this.config.defaultCwd,
+        smartFile: this.config.smartFile,
+        targetRatio: this.config.storageTargetRatio,
+        degradedRatio: this.config.storageDegradedRatio,
+        intervalMs: this.config.storageSweepIntervalMs,
+        isBusy: (key) => this.active.has(key) || this.pending.has(key),
+        sessions: this.sessions,
+      });
+      logger.info(
+        `容量調整を開始しました target=${Math.round(this.config.storageTargetRatio * 100)}% degraded=${Math.round(this.config.storageDegradedRatio * 100)}% interval=${Math.round(this.config.storageSweepIntervalMs / 60000)}分`,
+      );
+    }
   }
 
   private isAllowedUser(userId: string): boolean {
     return isUserAllowed(this.config.allowedUserIds, userId);
   }
 
-  private isAllowedChannel(channelId: string): boolean {
-    return (
-      this.config.allowedChannelIds.size === 0 ||
-      this.config.allowedChannelIds.has(channelId)
-    );
+  private isAllowedChannel(channelId: string, parentId: string | null = null): boolean {
+    if (this.config.allowedChannelIds.size === 0) return true;
+    if (this.config.allowedChannelIds.has(channelId)) return true;
+    return parentId !== null && this.config.allowedChannelIds.has(parentId);
   }
 
   private async onMessage(message: Message): Promise<void> {
     try {
       if (message.author.bot || message.system) return;
+
+      const channel = await this.resolveChannel(message);
+      const ctx = channel ? await this.resolveContext(channel) : null;
+
       if (!this.isAllowedUser(message.author.id)) return;
-      if (!this.isAllowedChannel(message.channelId)) return;
+      if (!this.isAllowedChannel(message.channelId, ctx?.parentId ?? null)) return;
 
       const prompt = message.content.trim();
       const attachments = [...message.attachments.values()];
       if (prompt === '' && attachments.length === 0) return;
 
-      const ui = this.messageUi(message);
-      if (!ui) {
+      const ui = channel ? this.channelUi(channel) : null;
+      if (!ui || !ctx) {
         logger.warn(`送信できないチャンネルです: ${message.channelId}`);
         return;
       }
 
-      await this.handlePrompt(message.channelId, prompt, ui, attachments, message.id);
+      await this.handlePrompt(message.channelId, prompt, ui, attachments, message.id, ctx);
     } catch (error) {
       logger.error(`メッセージ処理に失敗しました: ${errorMessage(error)}`);
     }
   }
 
-  private messageUi(message: Message): PromptUi | null {
-    const channel = message.channel;
+  private async resolveChannel(message: Message): Promise<Channel | null> {
+    if (message.channel) return message.channel;
+    try {
+      return await this.client.channels.fetch(message.channelId);
+    } catch (error) {
+      logger.warn(
+        `チャンネルを取得できませんでした channel=${message.channelId}: ${errorMessage(error)}`,
+      );
+      return null;
+    }
+  }
+
+  private async resolveContext(channel: Channel): Promise<ChatContext> {
+    const parentId = channel.isThread() ? (channel.parentId ?? null) : null;
+    if (!channel.isThread() || channel.parent || parentId === null) {
+      return describeChannel(channel);
+    }
+
+    try {
+      const parent = await this.client.channels.fetch(parentId);
+      if (parent) return describeChannel(channel, parent);
+    } catch (error) {
+      logger.warn(
+        `親チャンネルを取得できませんでした channel=${parentId}: ${errorMessage(error)}`,
+      );
+    }
+    return describeChannel(channel);
+  }
+
+  private channelUi(channel: Channel | null): PromptUi | null {
     if (!isSendable(channel)) return null;
 
     return {
@@ -309,7 +393,10 @@ export class Bot {
         });
         return;
       }
-      if (!this.isAllowedChannel(interaction.channelId)) {
+      const ctx = interaction.channel
+        ? await this.resolveContext(interaction.channel)
+        : null;
+      if (!this.isAllowedChannel(interaction.channelId, ctx?.parentId ?? null)) {
         await interaction.reply({
           content: 'このチャンネルは許可されていません。',
           flags: MessageFlags.Ephemeral,
@@ -319,7 +406,7 @@ export class Bot {
 
       switch (interaction.commandName) {
         case 'ask':
-          await this.handleAsk(interaction);
+          await this.handleAsk(interaction, ctx);
           break;
         case 'new':
           await this.handleNew(interaction);
@@ -329,6 +416,9 @@ export class Bot {
           break;
         case 'status':
           await this.handleStatus(interaction);
+          break;
+        case 'storage':
+          await this.handleStorage(interaction);
           break;
         case 'stop':
           await this.handleStop(interaction);
@@ -359,9 +449,12 @@ export class Bot {
 
   private async onAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
     try {
+      const parentId = interaction.channel?.isThread()
+        ? (interaction.channel.parentId ?? null)
+        : null;
       if (
         !this.isAllowedUser(interaction.user.id) ||
-        !this.isAllowedChannel(interaction.channelId)
+        !this.isAllowedChannel(interaction.channelId, parentId)
       ) {
         await interaction.respond([]);
         return;
@@ -376,6 +469,8 @@ export class Bot {
 
       if (focused.name === 'effort') {
         const record = this.sessions.get(interaction.channelId, this.config.defaultCwd);
+        const effectiveModel = record.model ?? this.config.defaultModel;
+        const support = effortsFor(effectiveModel);
         const current = record.effort ?? this.config.defaultEffort;
         const values = new Map<string, string>();
         if (current && current.includes(query)) {
@@ -384,7 +479,7 @@ export class Bot {
         if ('default'.includes(query)) {
           values.set('default', 'default');
         }
-        for (const level of EFFORTS) {
+        for (const level of support.known ? support.efforts : EFFORTS) {
           if (level.includes(query)) values.set(level, level);
         }
         await interaction.respond(
@@ -470,7 +565,10 @@ export class Bot {
     return this.modelLoad;
   }
 
-  private async handleAsk(interaction: ChatInputCommandInteraction): Promise<void> {
+  private async handleAsk(
+    interaction: ChatInputCommandInteraction,
+    ctx: ChatContext | null,
+  ): Promise<void> {
     const prompt = interaction.options.getString('prompt', true).trim();
     if (prompt === '') {
       await interaction.reply({ content: 'プロンプトが空です。', flags: MessageFlags.Ephemeral });
@@ -508,7 +606,7 @@ export class Bot {
       },
     };
 
-    await this.handlePrompt(interaction.channelId, prompt, ui, [], null);
+    await this.handlePrompt(interaction.channelId, prompt, ui, [], null, ctx);
   }
 
   private async handleNew(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -522,10 +620,28 @@ export class Bot {
 
   private async handleCwd(interaction: ChatInputCommandInteraction): Promise<void> {
     const input = interaction.options.getString('path', true);
-    const record = this.sessions.get(interaction.channelId, this.config.defaultCwd);
+    const force = interaction.options.getBoolean('force') ?? false;
+    const key = interaction.channelId;
+    const record = this.sessions.get(key, this.config.defaultCwd);
     try {
       const target = await resolveDirectory(input, this.config.allowedRoots, record.cwd);
-      await this.sessions.setCwd(interaction.channelId, target);
+
+      if (!force && target !== record.cwd && this.sessions.cwdTaken(target, key)) {
+        const users = this.sessions
+          .entries()
+          .filter(([other, otherRecord]) => other !== key && otherRecord.cwd === target)
+          .length;
+        if (this.config.cwdConflict === 'deny') {
+          await interaction.reply({
+            content: `\`${target}\` は他の ${users} スレッドが使用中です。\n同時に編集すると衝突するため変更しません。意図的な共有なら \`force:true\` を付けてください。`,
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+        logger.warn(`cwd が重複しています target=${target} channel=${key} users=${users}`);
+      }
+
+      await this.sessions.setCwd(key, target);
       await interaction.reply({
         content: `cwd を変更しました: \`${target}\`\nセッションはリセットされました。`,
         flags: MessageFlags.Ephemeral,
@@ -539,6 +655,7 @@ export class Bot {
   }
 
   private async handleModel(interaction: ChatInputCommandInteraction): Promise<void> {
+    const key = interaction.channelId;
     const modelInputRaw = interaction.options.getString('model');
     const effortInputRaw = interaction.options.getString('effort');
     const modelInput = modelInputRaw === null ? null : modelInputRaw.trim();
@@ -560,6 +677,11 @@ export class Bot {
       }
     }
 
+    const record = this.sessions.get(key, this.config.defaultCwd);
+    const targetModel =
+      nextModel !== undefined ? nextModel : (record.model ?? this.config.defaultModel);
+    const support = effortsFor(targetModel);
+
     let nextEffort: string | null | undefined;
     if (effortInput !== null && effortInput !== '') {
       if (effortInput === 'default' || effortInput === 'reset') {
@@ -570,30 +692,61 @@ export class Bot {
           flags: MessageFlags.Ephemeral,
         });
         return;
+      } else if (support.known && support.efforts.length === 0) {
+        await interaction.reply({
+          content: `\`${targetModel}\` は effort に対応していません。`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      } else if (support.known && !(support.efforts as readonly string[]).includes(effortInput)) {
+        await interaction.reply({
+          content: `\`${targetModel}\` で使える effort は ${support.efforts.join(' / ')} です。`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
       } else {
         nextEffort = effortInput;
       }
     }
 
+    const notes: string[] = [];
     if (nextModel !== undefined) {
-      await this.sessions.setModel(interaction.channelId, nextModel);
+      await this.sessions.setModel(key, nextModel);
+      const kept = this.sessions.get(key, this.config.defaultCwd).effort;
+      if (kept !== null && nextEffort === undefined) {
+        const nextSupport = effortsFor(nextModel);
+        if (nextSupport.known && !(nextSupport.efforts as readonly string[]).includes(kept)) {
+          await this.sessions.setEffort(key, null);
+          notes.push(`effort を解除しました（\`${nextModel ?? 'デフォルト'}\` では使えない値でした）。`);
+        }
+      }
     }
     if (nextEffort !== undefined) {
-      await this.sessions.setEffort(interaction.channelId, nextEffort);
+      await this.sessions.setEffort(key, nextEffort);
     }
 
-    const record = this.sessions.get(interaction.channelId, this.config.defaultCwd);
-    const model = record.model ?? this.config.defaultModel;
-    const effort = record.effort ?? this.config.defaultEffort;
+    const updated = this.sessions.get(key, this.config.defaultCwd);
+    const model = updated.model ?? this.config.defaultModel;
+    const effort = updated.effort ?? this.config.defaultEffort;
     const changed = nextModel !== undefined || nextEffort !== undefined;
     if (changed) {
       logger.info(
-        `model 設定 channel=${interaction.channelId} model=${record.model ?? 'default'} effort=${record.effort ?? 'default'}`,
+        `model 設定 channel=${key} model=${updated.model ?? 'default'} effort=${updated.effort ?? 'default'}`,
       );
     }
+
+    const effortSupport = effortsFor(model);
+    const effortLabel =
+      effort !== null
+        ? `\`${effort}\``
+        : effortSupport.known && effortSupport.efforts.length === 0
+          ? 'デフォルト（このモデルは effort 非対応）'
+          : 'デフォルト';
+
     const lines = [
       `model: ${model ? `\`${model}\`` : 'デフォルト'}`,
-      `effort: ${effort ? `\`${effort}\`` : 'デフォルト'}`,
+      `effort: ${effortLabel}`,
+      ...notes,
       changed
         ? '次のメッセージから適用されます。'
         : '変更するには model / effort を指定してください（候補から選択できます）。',
@@ -613,33 +766,106 @@ export class Bot {
   }
 
   private async handleStatus(interaction: ChatInputCommandInteraction): Promise<void> {
-    const record = this.sessions.get(interaction.channelId, this.config.defaultCwd);
+    const ctx = interaction.channel
+      ? await this.resolveContext(interaction.channel)
+      : null;
+    const key = interaction.channelId;
+    const record = this.sessions.get(key, this.config.defaultCwd);
     const model = record.model ?? this.config.defaultModel;
     const effort = record.effort ?? this.config.defaultEffort;
-    const running = this.active.has(interaction.channelId);
+    const running = this.active.has(key);
+    const waiting = this.queue.depth(key) - (running ? 1 : 0);
+    const sourceLabel: Record<SessionRecord['cwdSource'], string> = {
+      default: '既定',
+      thread: '投稿ごとに自動作成',
+      user: '/cwd で指定',
+      unknown: '既存の設定',
+    };
+    const effortSupport = effortsFor(model);
+    const agentsMeta = await readWorkdirMeta(record.cwd);
+    const agentsExists = await fileExists(path.join(record.cwd, 'AGENTS.md'));
     const lines = [
-      `cwd: \`${record.cwd}\``,
+      ...(ctx ? [`場所: ${ctx.label}`] : []),
+      `cwd: \`${record.cwd}\` (${sourceLabel[record.cwdSource]})`,
       `session: ${record.sessionId ? `\`${record.sessionId}\`` : 'なし'}`,
       `model: ${model ? `\`${model}\`` : 'デフォルト'}`,
-      `effort: ${effort ? `\`${effort}\`` : 'デフォルト'}`,
-      `状態: ${running ? '実行中' : '待機中'}`,
+      `effort: ${effort ? `\`${effort}\`` : effortSupport.known && effortSupport.efforts.length === 0 ? 'デフォルト（このモデルは非対応）' : 'デフォルト'}`,
+      ...(record.createdAt
+        ? [`作成: ${record.createdAt.slice(0, 16).replace('T', ' ')} / 最終作業: ${record.updatedAt.slice(0, 16).replace('T', ' ')}`]
+        : [`最終作業: ${record.updatedAt.slice(0, 16).replace('T', ' ')}`]),
+      `AGENTS.md: ${agentsMeta ? '自動更新あり' : agentsExists ? 'あり（自動更新なし）' : 'なし'}`,
+      `状態: ${running ? '実行中' : '待機中'}${waiting > 0 ? ` / 待ち ${waiting} 件` : ''}`,
       `同時実行上限: ${this.config.maxConcurrency}`,
       `稼働時間: ${formatDuration(Date.now() - this.startedAt)}`,
     ];
     await interaction.reply({ content: lines.join('\n'), flags: MessageFlags.Ephemeral });
   }
 
+  private async handleStorage(interaction: ChatInputCommandInteraction): Promise<void> {
+    const status = await readDiskStatus(this.config.defaultCwd, this.config.smartFile);
+    const degraded = status.smart === 'warning' || status.smart === 'critical';
+    const targetRatio = degraded
+      ? Math.min(this.config.storageTargetRatio, this.config.storageDegradedRatio)
+      : this.config.storageTargetRatio;
+
+    const candidates = await listCandidates(
+      this.sessions,
+      this.config.defaultCwd,
+      (key) => this.active.has(key) || this.pending.has(key),
+    );
+    const top = candidates.slice(0, 5);
+    const sizes = await Promise.all(top.map((candidate) => measureDirectory(candidate.cwd)));
+
+    const gb = (bytes: number): string => `${(bytes / 1024 / 1024 / 1024).toFixed(1)}GB`;
+    const lines = [
+      `作業領域: \`${this.config.defaultCwd}\` (${gb(status.usedBytes)} / ${gb(status.totalBytes)}, ${(status.usedRatio * 100).toFixed(1)}%)`,
+      `目標: ${Math.round(targetRatio * 100)}%${degraded ? '（SMART 劣化中のため強化）' : ''}`,
+      `SMART: ${status.smart}${status.smartDetail ? ` (${status.smartDetail})` : ''}`,
+      `削除候補: ${candidates.length} 件（自動削除は 1 回 5 件まで）`,
+    ];
+
+    top.forEach((candidate, index) => {
+      const when = new Date(candidate.lastUsedAt).toISOString().slice(0, 10);
+      lines.push(
+        `${index + 1}. ${candidate.cwd.replace(`${this.config.defaultCwd}/`, '')} — ${gb(sizes[index] ?? 0)}, 最終 ${when}`,
+      );
+    });
+
+    if (candidates.length === 0) lines.push('（自動作成された作業ディレクトリのみが対象です）');
+
+    await interaction.reply({
+      content: truncate(lines.join('\n'), 1900),
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
   private async handleStop(interaction: ChatInputCommandInteraction): Promise<void> {
-    const controller = this.active.get(interaction.channelId);
-    if (!controller) {
+    const key = interaction.channelId;
+    const running = this.active.get(key);
+    if (running) {
+      running.abort();
+      await interaction.reply({ content: '停止しました。', flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const queued = this.pending.get(key);
+    if (queued && queued.size > 0) {
+      for (const controller of queued) {
+        controller.abort();
+      }
+      queued.clear();
+      this.pending.delete(key);
       await interaction.reply({
-        content: '実行中の処理はありません。',
+        content: '待機中のジョブを取り消しました。',
         flags: MessageFlags.Ephemeral,
       });
       return;
     }
-    controller.abort();
-    await interaction.reply({ content: '停止しました。', flags: MessageFlags.Ephemeral });
+
+    await interaction.reply({
+      content: '実行中の処理はありません。',
+      flags: MessageFlags.Ephemeral,
+    });
   }
 
   private async handlePrompt(
@@ -648,52 +874,88 @@ export class Bot {
     ui: PromptUi,
     attachments: Attachment[] = [],
     messageId: string | null = null,
+    ctx: ChatContext | null = null,
   ): Promise<void> {
-    const progressUi = await this.safeCreateProgress(ui);
+    const key = channelId;
+    const queuedAhead = this.queue.depth(key);
+    const placeholder =
+      queuedAhead > 0 ? `待機中… (待ち ${queuedAhead} 件)` : '待機中…';
+    const progressUi = await this.safeCreateProgress(ui, placeholder);
 
-    const job = this.queue.run(channelId, async () => {
-      const record = this.sessions.get(channelId, this.config.defaultCwd);
-      await this.ensureCwd(record.cwd);
+    const controller = new AbortController();
+    const queued = this.pending.get(key) ?? new Set<AbortController>();
+    queued.add(controller);
+    this.pending.set(key, queued);
 
-      let saved: SavedAttachment[] = [];
-      let attachmentErrors: string[] = [];
-      if (attachments.length > 0 && messageId) {
-        const attachmentResult = await saveAttachments(attachments, record.cwd, messageId);
-        saved = attachmentResult.saved;
-        attachmentErrors = attachmentResult.errors;
+    const job = this.queue.run(key, async () => {
+      queued.delete(controller);
+      if (queued.size === 0 && this.pending.get(key) === queued) {
+        this.pending.delete(key);
       }
-      const effectivePrompt = buildPrompt(prompt, saved, attachmentErrors);
-      const model = record.model ?? this.config.defaultModel;
-      const effort = record.effort ?? this.config.defaultEffort;
-
-      const controller = new AbortController();
-      this.active.set(channelId, controller);
-      const progress = new Progress(progressUi, this.config.progressIntervalMs, (activity) => {
-        logger.info(`進捗 channel=${channelId} ${activity}`);
-      });
-      progress.start();
+      if (controller.signal.aborted) {
+        await progressUi.edit('取り消しました。');
+        return;
+      }
+      this.active.set(key, controller);
 
       try {
+        const record = this.sessions.get(key, this.config.defaultCwd);
+        const cwd = await this.resolveThreadCwd(key, record, ctx);
+        const sessionId = cwd === record.cwd ? record.sessionId : null;
+        await this.ensureCwd(cwd);
+
+        let saved: SavedAttachment[] = [];
+        let attachmentErrors: string[] = [];
+        if (attachments.length > 0 && messageId) {
+          const attachmentResult = await saveAttachments(attachments, cwd, messageId);
+          saved = attachmentResult.saved;
+          attachmentErrors = attachmentResult.errors;
+        }
+        const effectivePrompt = buildPrompt({
+          prompt,
+          files: saved,
+          errors: attachmentErrors,
+          nonce: createNonce(),
+        });
+        const model = record.model ?? this.config.defaultModel;
+        const effort = record.effort ?? this.config.defaultEffort;
+
+        const support = effortsFor(model);
+        const effortArg =
+          effort !== null && (!support.known || support.efforts.length > 0) ? effort : null;
+        if (effort !== null && effortArg === null) {
+          logger.warn(
+            `effort を無視します（モデル非対応） channel=${key} model=${model ?? 'default'} effort=${effort}`,
+          );
+          await this.sessions.setEffort(key, null);
+        }
+
+        const progress = new Progress(progressUi, this.config.progressIntervalMs, (activity) => {
+          logger.info(`進捗 channel=${key} ${activity}`);
+        });
+        progress.start();
+
         logger.info(
-          `実行開始 channel=${channelId} cwd=${record.cwd} resume=${record.sessionId ? 'yes' : 'no'} model=${model ?? 'default'} effort=${effort ?? 'default'} attachments=${saved.length}`,
+          `実行開始 channel=${key} cwd=${cwd} resume=${sessionId ? 'yes' : 'no'} model=${model ?? 'default'} effort=${effortArg ?? 'default'} attachments=${saved.length}${ctx ? ` where=${ctx.label}` : ''}`,
         );
         const run = await runCmd({
           cmdBin: this.config.cmdBin,
           prompt: effectivePrompt,
-          cwd: record.cwd,
-          sessionId: record.sessionId,
+          cwd,
+          sessionId,
           model,
-          effort,
+          effort: effortArg,
           signal: controller.signal,
           onEvent: (event) => progress.handleEvent(event),
         });
         logger.info(
-          `実行終了 channel=${channelId} exit=${run.exitCode} duration=${run.durationMs}ms`,
+          `実行終了 channel=${key} exit=${run.exitCode} duration=${run.durationMs}ms`,
         );
-        await this.completeRun(channelId, run, ui, progress, record.cwd);
+        await this.completeRun(key, run, ui, progress, cwd);
+        await this.updateWorkdirAgents(key, cwd, record, ctx, run);
       } finally {
-        if (this.active.get(channelId) === controller) {
-          this.active.delete(channelId);
+        if (this.active.get(key) === controller) {
+          this.active.delete(key);
         }
       }
     });
@@ -710,9 +972,46 @@ export class Bot {
     }
   }
 
-  private async safeCreateProgress(ui: PromptUi): Promise<ProgressUi> {
+  private async resolveThreadCwd(
+    key: string,
+    record: SessionRecord,
+    ctx: ChatContext | null,
+  ): Promise<string> {
+    const decision = decideThreadCwd(ctx, record, this.config.forumCwd);
+    if (!decision.auto || decision.slug === null) return record.cwd;
+
+    const target = threadCwdPath(
+      this.config.defaultCwd,
+      decision.slug,
+      key,
+      (candidate) => this.sessions.cwdTaken(candidate, key),
+    );
+
     try {
-      return await ui.createProgress('待機中…');
+      await mkdir(target, { recursive: true, mode: 0o775 });
+      const real = await realpath(target);
+      if (!this.config.allowedRoots.some((root) => isWithin(root, real))) {
+        logger.warn(`投稿用の cwd が許可ルートの外です: ${real}`);
+        return record.cwd;
+      }
+      if (real !== record.cwd) {
+        await this.sessions.setCwd(key, real, 'thread');
+      }
+      return real;
+    } catch (error) {
+      logger.warn(
+        `投稿用の cwd を作成できませんでした ${target}: ${errorMessage(error)}`,
+      );
+      return record.cwd;
+    }
+  }
+
+  private async safeCreateProgress(
+    ui: PromptUi,
+    placeholder = '待機中…',
+  ): Promise<ProgressUi> {
+    try {
+      return await ui.createProgress(placeholder);
     } catch (error) {
       logger.warn(`進捗メッセージを作成できませんでした: ${errorMessage(error)}`);
       return {
@@ -730,6 +1029,33 @@ export class Bot {
     }
     if (!info.isDirectory()) {
       throw new Error(`cwd がディレクトリではありません: ${cwd}`);
+    }
+  }
+
+  private async updateWorkdirAgents(
+    key: string,
+    cwd: string,
+    record: SessionRecord,
+    ctx: ChatContext | null,
+    run: RunResult,
+  ): Promise<void> {
+    if (this.config.workdirMeta === 'off') return;
+    if (this.config.workdirMeta === 'thread' && record.cwdSource !== 'thread') return;
+
+    try {
+      const current = this.sessions.get(key, this.config.defaultCwd);
+      const previous = await readWorkdirMeta(cwd);
+      const now = new Date().toISOString();
+      await upsertWorkdirAgents(cwd, {
+        threadLabel: ctx?.label ?? key,
+        createdAt: previous?.createdAt ?? record.createdAt ?? now,
+        updatedAt: now,
+        sessionId: run.sessionId ?? current.sessionId,
+        model: current.model ?? this.config.defaultModel,
+        effort: current.effort ?? this.config.defaultEffort,
+      });
+    } catch (error) {
+      logger.warn(`AGENTS.md を更新できませんでした ${cwd}: ${errorMessage(error)}`);
     }
   }
 
@@ -786,13 +1112,27 @@ export class Bot {
       status += `\n添付: ${files.length} ファイル`;
     }
 
-    await progress.finish(truncate(status, 1900));
-
     if (result?.error?.includes('No session') && !run.sessionId) {
       await this.sessions.clearSession(channelId);
     } else if (run.sessionId) {
       await this.sessions.setSessionId(channelId, run.sessionId);
     }
+
+    if (run.exitCode !== 0 && !run.aborted) {
+      const detail = `${result?.error ?? ''}\n${run.stderr}`.toLowerCase();
+      const effortRejected =
+        detail.includes('effort') &&
+        (detail.includes('invalid') ||
+          detail.includes('unsupported') ||
+          detail.includes('not supported'));
+      if (effortRejected && this.sessions.get(channelId, this.config.defaultCwd).effort !== null) {
+        await this.sessions.setEffort(channelId, null);
+        logger.warn(`effort が拒否されたため解除しました channel=${channelId}`);
+        status += '\neffort を解除しました。次のメッセージから既定値で実行します。';
+      }
+    }
+
+    await progress.finish(truncate(status, 1900));
 
     if (answer) {
       const chunks = splitMessage(answer, 2000);

@@ -70,14 +70,56 @@
 | `/cwd <path>` | 作業ディレクトリを変更（許可ルート配下のみ） |
 | `/model [model:<id>] [effort:<level>]` | モデルと推論の強さを表示・変更（autocomplete、`default` で解除） |
 | `/status` | 現在の cwd / sessionId / model / effort / 実行状態 |
-| `/stop` | 実行中のプロセスを kill |
+| `/storage` | ディスク使用量・SMART 判定・削除候補の表示（dry-run） |
+| `/stop` | 実行中・待機中の処理を取り消す |
 | `/usage` | 使用量・クレジットの確認先を表示 |
 
-`/model` の model / effort は候補から選択でき、文字入力で絞り込めます。モデル候補は `cmd --list-models` から取得して 10 分キャッシュします。推論強度は `off` / `low` / `medium` / `high` / `xhigh` / `max` で、モデルが対応している値のみ有効です。
+`/model` の model / effort は候補から選択でき、文字入力で絞り込めます。モデル候補は `cmd --list-models` から取得して 10 分キャッシュします。
+
+### 既定モデルと effort
+
+既定は `deepseek/deepseek-v4.1-flash`（vision 対応、1M context、cache read $0.003/1M）。`--resume` で同じコンテキストを毎ターン送る使い方では cache read の単価が支配的なので、`-fast` 系（cache $0.016〜$0.07）より安く済みます。
+
+effort の有効値は**モデルごとに違います**。bot はカタログに合わせて検証するので、存在しない値を送ってエラーになることはありません。
+
+| モデル例 | 使える effort |
+| --- | --- |
+| `deepseek/deepseek-v4.1-flash` | `off` / `low` / `high` / `max` |
+| `Qwen/Qwen3.8-Flash` | `low` / `medium` / `xhigh` |
+| `claude-sonnet-5-5` など Claude / GPT-6 系 | `low` / `medium` / `high` / `xhigh` / `max` |
+| `Qwen/Qwen3.7-Flash`、`claude-haiku-4-5` など | 非対応（effort を指定できない） |
+
+- 非対応モデルに effort を指定すると理由付きで拒否します。
+- モデルを変えて保存済み effort が合わなくなった場合は自動で解除し、応答に表示します。
+- 実行時に `cmd` が effort を拒否した場合も自動で解除して、次回から再発しません。
+- 表に無いモデル（BYOK など）は検証せずに `cmd` へ渡します。
+
+### フォーラムでの使い方
+
+フォーラムの投稿（スレッド）は、投稿ごとに独立したセッション・独立したキューになります。`MAX_CONCURRENCY`（既定 3）までは別の投稿が同時に実行され、それを超えた分だけ `待機中… (待ち N 件)` として順番待ちになります。同じ投稿の中では従来どおり直列です。
+
+`FORUM_CWD=auto`（既定）では、投稿ごとに `<DEFAULT_CWD>/<フォーラム名>/<投稿名>` を自動作成して作業ディレクトリにします。`/cwd` で明示的に指定した場合はそちらが優先され、自動の割り当てには戻りません。`FORUM_CWD=shared` にすると全投稿で `DEFAULT_CWD` を共有します。通常のテキストチャンネルとそのスレッドは従来どおり共有です。
+
+### スレッド間の干渉を避ける
+
+- セッション・キュー・作業ディレクトリはスレッド（フォーラム投稿）ごとに独立しています。
+- 他のスレッドが使用中のディレクトリへ `/cwd` しようとすると、既定では拒否します。意図的に共有する場合だけ `/cwd path:<path> force:true` を使ってください（`CWD_CONFLICT=warn` にすると拒否せずログだけ残します）。
+- 各スレッドの作業ディレクトリには `AGENTS.md` が作られ、スレッド名・作成日・最終作業・session・model・effort が自動更新されます。**既存の `AGENTS.md` には追記せず、bot が作ったマーカーブロックがある場合だけ更新します**。
+
+### ディスク容量の自動調整
+
+`/srv` の使用率が `STORAGE_TARGET_PERCENT`（既定 75%）を超えると、**bot が自動作成したスレッド作業ディレクトリ**を最終作業の古い順に削除します。1 回 5 件まで、実行中のスレッドは対象外です。
+
+- SMART が `warning` / `critical` のときは目標を `STORAGE_DEGRADED_PERCENT`（既定 60%）に強めて HDD を守ります。
+- 削除前に `node_modules` / `dist` / `.discord-uploads` などの再生成可能なディレクトリを先に消します。
+- `/cwd` で自分で指定したディレクトリ、`DEFAULT_CWD` 直下のファイル、シンボリックリンクは**削除しません**。
+- `/storage` で使用量・SMART 判定・削除候補を確認できます（表示のみで削除はしません）。
+- `STORAGE_TARGET_PERCENT=0` で自動削除を無効化できます。
 
 ## ファイルの受け渡し
 
-- メッセージに添付したファイルは `<cwd>/.discord-uploads/` に保存され、cmd にパスが渡されます。
+- メッセージに添付したファイルは `<cwd>/.discord-uploads/` に保存され、cmd にパスが渡されます。`.discord-uploads/.gitignore` を自動で置くので、リポジトリの `git status` は汚れません。
+- 保存した添付は `UPLOAD_TTL_HOURS`（既定 24 時間）を過ぎると削除されます。起動時と `UPLOAD_SWEEP_INTERVAL_MINUTES`（既定 60 分）ごとに、`ALLOWED_ROOTS` 配下の `.discord-uploads` を走査します。`0` を指定すると削除しません。
 - cmd が回答の末尾に `[[attach:relative/path]]` を含めると、そのファイルを Discord に返します。
 - 返却できるのは cwd 配下の通常ファイルのみ。`.env`、`.git`、`node_modules` などは拒否します。
 - 1 ファイル 24MB、最大 10 ファイルまで。
@@ -88,6 +130,12 @@
 - bot は `cmdbot` で実行し、systemd の sandbox（`ProtectSystem=strict`、`NoNewPrivileges` など）で動作。
 - `.env` は root 所有 600。トークンは systemd の `EnvironmentFile` 経由でのみ読み、`cmd` 子プロセスには秘密の環境変数を渡さない。
 - `~/.commandcode/settings.json` の deny ルールで sudo / systemctl / 秘密ファイルの読み取りを禁止。
+- さらに `PreToolUse` hook（`deploy/guard.sh`）で方針を決定論的に強制します。
+  - 作業ディレクトリ（`ALLOWED_ROOTS`、既定 `/srv/work`）の中だけ読み書きできる。
+  - サーバー構成ファイル（`/etc`、`/boot`、`/root`、`/sys`、`/proc`、`/var/lib`、`/var/log`、`/home/cmdbot`、`/srv/work` 以外の `/srv`）は読めない。
+  - 例外として稼働状況の確認だけ許可する: `systemctl status` / `is-active` / `is-failed` / `show` / `cat` / `list-*`、`journalctl`、`sensors`、`df`、`free`、`ps`、`uptime` など。
+  - `systemctl restart` などの変更操作、`sudo`、`mkfs`、`dd`、`chown`、`chmod`、ラッパー経由の実行は拒否する。
+- プロンプトは `<untrusted_message nonce="…">` で区切り、作業中に読むファイル・添付・Web ページ・ツール出力は命令ではなくデータとして扱うよう明示します。リポジトリ内の `AGENTS.md` などに書かれた指示で権限設定や秘密の扱いを変えないようにしています。
 - `sudo` は運用コマンドのみ NOPASSWD。全権限 sudo はパスワードが必要。運用は `botctl` に一本化している。
 - `dis.txt` などのトークン控えは削除する。
 - `cmd` は `--yolo` で動くため、招待するギルドと渡すリポジトリ/プロンプトを信頼できるものに限る。既定では参加ギルドの全ユーザーが実行できるので、必要なら `ALLOWED_USER_IDS` / `ALLOWED_CHANNEL_IDS` で制限する。
@@ -120,11 +168,20 @@ https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&permissions=1013
 | --- | --- |
 | `DISCORD_TOKEN` | Bot トークン（必須） |
 | `ALLOWED_USER_IDS` | 許可する Discord ユーザー ID（カンマ区切り、任意）。空なら参加ギルドの全ユーザーを許可 |
-| `ALLOWED_CHANNEL_IDS` | 許可するチャンネル ID（空なら全チャンネル） |
+| `ALLOWED_CHANNEL_IDS` | 許可するチャンネル ID（空なら全チャンネル）。フォーラム本体を指定すれば配下の投稿も許可される |
 | `ALLOWED_ROOTS` | `/cwd` で移動できるルート（必須） |
 | `CMD_BIN` | `cmd` の絶対パス |
-| `MAX_CONCURRENCY` | 同時に走らせる cmd の上限 |
+| `MAX_CONCURRENCY` | 同時に走らせる cmd の上限（既定 3） |
 | `SESSIONS_FILE` | セッション状態の保存先 |
+| `FORUM_CWD` | `auto`（投稿ごとに cwd を自動作成）/ `shared`（共有） |
+| `UPLOAD_TTL_HOURS` | 添付を残す時間（既定 24、0 で削除しない） |
+| `UPLOAD_SWEEP_INTERVAL_MINUTES` | 添付削除の実行間隔（既定 60、最小 5） |
+| `STORAGE_TARGET_PERCENT` | 作業領域の目標使用率（既定 75、0 で自動削除を無効化） |
+| `STORAGE_DEGRADED_PERCENT` | SMART 劣化時の目標使用率（既定 60） |
+| `STORAGE_SWEEP_INTERVAL_MINUTES` | 容量調整の実行間隔（既定 60、最小 10） |
+| `SMART_FILE` | `disk-health.timer` が書く SMART スナップショットのパス |
+| `WORKDIR_META` | `AGENTS.md` の自動更新範囲（`thread` / `always` / `off`） |
+| `CWD_CONFLICT` | 使用中ディレクトリへの `/cwd`（`deny` / `warn`） |
 | `CMD_MODEL` | 既定モデル（`/model` でチャンネルごとに上書き可能） |
 | `CMD_EFFORT` | 既定の推論強度（`/model effort:<level>` で上書き可能） |
 
@@ -157,6 +214,22 @@ sudo botctl deploy commandcode
 ```
 
 `botctl` が `git pull` → `nix build` → `systemctl restart` をまとめて実行する。
+
+### SMART スナップショット（任意）
+
+容量調整を HDD の健康状態に連動させるため、root の timer が 1 時間ごとに SMART を書き出す。
+
+```bash
+sudo install -o root -g root -m 755 deploy/disk-health /usr/local/sbin/disk-health
+sudo install -o root -g root -m 644 deploy/disk-health.service /etc/systemd/system/
+sudo install -o root -g root -m 644 deploy/disk-health.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now disk-health.timer
+sudo systemctl start disk-health.service
+cat /var/lib/commandcode-discordbot/smart.json
+```
+
+監視するデバイスは既定で `/dev/sdb`。変える場合は `/etc/default/disk-health` に `DISK_DEVICE=/dev/sdX` を置く。`smartctl` が使えない場合は `verdict:"unavailable"` が書かれ、bot は使用率だけで判定する。
 
 ```bash
 sudo botctl deploy commandcode   # pull + nix build + restart

@@ -31,6 +31,8 @@ const MAX_FILES = 10;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 const MAX_SEND_BYTES = 24 * 1024 * 1024;
+export const UPLOAD_DIR = '.discord-uploads';
+const UPLOAD_GITIGNORE = '*\n';
 const SENSITIVE_BASENAMES = [
   /^\.env/i,
   /\.pem$/i,
@@ -73,9 +75,14 @@ export async function saveAttachments(
   }
 
   const safeMessageId = messageId.replace(/[^0-9]/g, '') || 'message';
-  const directory = path.join(cwd, '.discord-uploads', `${safeMessageId}-${Date.now()}`);
+  const uploadRoot = path.join(cwd, UPLOAD_DIR);
+  const directory = path.join(uploadRoot, `${safeMessageId}-${Date.now()}`);
   try {
     await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(path.join(uploadRoot, '.gitignore'), UPLOAD_GITIGNORE, {
+      flag: 'wx',
+      mode: 0o644,
+    }).catch(() => undefined);
   } catch (error) {
     return { saved, errors: [`保存先を作成できません: ${errorMessage(error)}`] };
   }

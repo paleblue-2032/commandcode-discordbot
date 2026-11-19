@@ -37,6 +37,7 @@ export class Semaphore {
 
 export class ChannelQueue {
   private readonly chains = new Map<string, Promise<void>>();
+  private readonly counts = new Map<string, number>();
   private readonly semaphore: Semaphore;
 
   constructor(concurrency: number) {
@@ -44,6 +45,8 @@ export class ChannelQueue {
   }
 
   run<T>(key: string, task: () => Promise<T>): Promise<T> {
+    this.counts.set(key, this.depth(key) + 1);
+
     const previous = this.chains.get(key) ?? Promise.resolve();
     const started = previous.then(async () => {
       const release = await this.semaphore.acquire();
@@ -63,9 +66,19 @@ export class ChannelQueue {
       if (this.chains.get(key) === settled) {
         this.chains.delete(key);
       }
+      const remaining = this.depth(key) - 1;
+      if (remaining <= 0) {
+        this.counts.delete(key);
+      } else {
+        this.counts.set(key, remaining);
+      }
     });
 
     return started;
+  }
+
+  depth(key: string): number {
+    return this.counts.get(key) ?? 0;
   }
 
   get activeChannels(): number {
