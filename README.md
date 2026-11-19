@@ -125,8 +125,9 @@ effort の有効値は**モデルごとに違います**。bot はカタログ�
 
 ## ファイルの受け渡し
 
-- メッセージに添付したファイルは `<cwd>/.discord-uploads/` に保存され、cmd にパスが渡されます。`.discord-uploads/.gitignore` を自動で置くので、リポジトリの `git status` は汚れません。
-- 保存した添付は `UPLOAD_TTL_HOURS`（既定 24 時間）を過ぎると削除されます。起動時と `UPLOAD_SWEEP_INTERVAL_MINUTES`（既定 60 分）ごとに、`ALLOWED_ROOTS` 配下の `.discord-uploads` を走査します。`0` を指定すると削除しません。
+- メッセージに添付したファイルは、そのスレッドの作業ディレクトリの `<cwd>/.discord-uploads/` に保存され、cmd にパスが渡されます。`.discord-uploads/.gitignore` を自動で置くので、リポジトリの `git status` は汚れません。
+- 保存した添付は**既定では時間で削除しません**。スレッドの作業ディレクトリごと残ります。必要なら `UPLOAD_TTL_HOURS` に時間数を指定すると、その時間を過ぎた添付だけを削除します（`0` が既定で無効）。
+- 容量が厳しくなったときは、後述の容量調整が**スレッドの作業ディレクトリごと**削除します。
 - cmd が回答の末尾に `[[attach:relative/path]]` を含めると、そのファイルを Discord に返します。
 - 返却できるのは cwd 配下の通常ファイルのみ。`.env`、`.git`、`node_modules` などは拒否します。
 - 1 ファイル 24MB、最大 10 ファイルまで。

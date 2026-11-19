@@ -51,19 +51,19 @@ test('forum cwd and upload retention defaults', async () => {
   await withRoot(async (root) => {
     const config = await loadConfig({ DISCORD_TOKEN: 'token', ALLOWED_ROOTS: root });
     assert.equal(config.forumCwd, 'auto');
-    assert.equal(config.uploadTtlMs, 24 * 60 * 60 * 1000);
+    assert.equal(config.uploadTtlMs, 0, 'attachments must be kept by default');
     assert.equal(config.uploadSweepIntervalMs, 60 * 60 * 1000);
   });
 });
 
-test('UPLOAD_TTL_HOURS=0 disables cleanup', async () => {
+test('UPLOAD_TTL_HOURS enables attachment cleanup', async () => {
   await withRoot(async (root) => {
     const config = await loadConfig({
       DISCORD_TOKEN: 'token',
       ALLOWED_ROOTS: root,
-      UPLOAD_TTL_HOURS: '0',
+      UPLOAD_TTL_HOURS: '24',
     });
-    assert.equal(config.uploadTtlMs, 0);
+    assert.equal(config.uploadTtlMs, 24 * 60 * 60 * 1000);
   });
 });
 

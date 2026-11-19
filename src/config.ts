@@ -134,7 +134,7 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
 
   const forumCwd = parseForumCwd(env.FORUM_CWD);
 
-  const uploadTtlHours = parseNonNegativeNumber(env.UPLOAD_TTL_HOURS, 24, 'UPLOAD_TTL_HOURS');
+  const uploadTtlHours = parseNonNegativeNumber(env.UPLOAD_TTL_HOURS, 0, 'UPLOAD_TTL_HOURS');
 
   const uploadSweepIntervalMinutes = parsePositiveInt(
     env.UPLOAD_SWEEP_INTERVAL_MINUTES,
